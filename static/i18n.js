@@ -8862,8 +8862,8 @@ const LOCALES = {
   },
 };
 
-// Active locale — defaults to English; overridden by loadLocale() at boot.
-let _locale = LOCALES.en;
+// Active locale — defaults to Chinese; overridden by loadLocale() at boot.
+let _locale = LOCALES.zh;
 
 /**
  * Resolve an incoming locale tag to a known LOCALES key.
@@ -8902,13 +8902,13 @@ function resolveLocale(lang) {
  * Resolve locale with precedence:
  * 1) primary (typically server setting)
  * 2) fallback (typically localStorage)
- * 3) English
+ * 3) Chinese
  * @param {string} primary
  * @param {string} fallback
  * @returns {string}
  */
 function resolvePreferredLocale(primary, fallback) {
-  return resolveLocale(primary) || resolveLocale(fallback) || 'en';
+  return resolveLocale(primary) || resolveLocale(fallback) || 'zh';
 }
 
 /**
@@ -8937,7 +8937,7 @@ function t(key, ...args) {
  * @param {string} lang
  */
 function setLocale(lang) {
-  const resolved = resolveLocale(lang) || 'en';
+  const resolved = resolveLocale(lang) || 'zh';
   _locale = LOCALES[resolved];
   localStorage.setItem('hermes-lang', resolved);
   document.documentElement.lang = _locale._speech || resolved;

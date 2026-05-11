@@ -2738,6 +2738,110 @@ _SHELL_ERROR_HTML = """<!doctype html>
 </html>"""
 
 
+def _md_inline(text: str) -> str:
+    """Render a tiny safe markdown subset for docs pages."""
+    escaped = _html.escape(text, quote=False)
+    escaped = re.sub(r"`([^`]+)`", r"<code>\1</code>", escaped)
+    escaped = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", escaped)
+    return escaped
+
+
+def _simple_markdown_to_html(md_text: str) -> str:
+    """Convert markdown to HTML using a minimal built-in parser.
+
+    Supported: headings, bullet lists, fenced code blocks, paragraphs,
+    inline code, and bold text.
+    """
+    lines = md_text.splitlines()
+    out: list[str] = []
+    para: list[str] = []
+    in_list = False
+    in_code = False
+
+    def flush_para() -> None:
+        nonlocal para
+        if para:
+            out.append(f"<p>{_md_inline(' '.join(para))}</p>")
+            para = []
+
+    def close_list() -> None:
+        nonlocal in_list
+        if in_list:
+            out.append("</ul>")
+            in_list = False
+
+    for line in lines:
+        if line.strip().startswith("```"):
+            flush_para()
+            close_list()
+            if not in_code:
+                in_code = True
+                out.append("<pre><code>")
+            else:
+                in_code = False
+                out.append("</code></pre>")
+            continue
+        if in_code:
+            out.append(_html.escape(line, quote=False))
+            continue
+        if not line.strip():
+            flush_para()
+            close_list()
+            continue
+        if line.lstrip().startswith("#"):
+            flush_para()
+            close_list()
+            level = min(len(line) - len(line.lstrip("#")), 6)
+            text = line[level:].strip()
+            out.append(f"<h{level}>{_md_inline(text)}</h{level}>")
+            continue
+        m = re.match(r"^\s*-\s+(.+)$", line)
+        if m:
+            flush_para()
+            if not in_list:
+                out.append("<ul>")
+                in_list = True
+            out.append(f"<li>{_md_inline(m.group(1).strip())}</li>")
+            continue
+        close_list()
+        para.append(line.strip())
+
+    flush_para()
+    close_list()
+    if in_code:
+        out.append("</code></pre>")
+    return "\n".join(out)
+
+
+def _serve_apidocs(handler) -> bool:
+    apidoc_path = (Path(__file__).parent.parent / "apidoc.md").resolve()
+    if not apidoc_path.exists():
+        return j(handler, {"error": "apidoc.md not found"}, status=404)
+    markdown = apidoc_path.read_text(encoding="utf-8")
+    content = _simple_markdown_to_html(markdown)
+    page = f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Hermes WebUI API 文档</title>
+  <style>
+    body {{ max-width: 980px; margin: 0 auto; padding: 24px; font-family: -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; line-height: 1.65; color: #111; background: #fff; }}
+    h1,h2,h3 {{ margin-top: 1.4em; }}
+    p,li {{ font-size: 14px; }}
+    code {{ background: #f5f5f5; border: 1px solid #e7e7e7; border-radius: 4px; padding: 1px 5px; }}
+    pre {{ background: #111; color: #eee; padding: 12px; border-radius: 8px; overflow-x: auto; }}
+    pre code {{ background: transparent; border: 0; padding: 0; color: inherit; }}
+    a {{ color: #0b57d0; }}
+  </style>
+</head>
+<body>
+  <main>{content}</main>
+</body>
+</html>"""
+    return t(handler, page, content_type="text/html; charset=utf-8")
+
+
 def _serve_shell_unavailable(handler, exc: Exception) -> bool:
     """Return HTML for shell-route failures so `/` never renders JSON."""
     logger.warning("Failed to serve WebUI shell route: %s", exc)
@@ -2803,6 +2907,9 @@ def handle_get(handler, parsed) -> bool:
             )
         )
         return t(handler, _page, content_type="text/html; charset=utf-8")
+
+    if parsed.path == "/apidocs":
+        return _serve_apidocs(handler)
 
     if parsed.path == "/api/auth/status":
         from api.auth import is_auth_enabled, parse_cookie, verify_session
