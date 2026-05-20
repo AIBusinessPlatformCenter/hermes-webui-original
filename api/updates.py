@@ -1,8 +1,8 @@
 """
 Hermes Web UI -- Self-update checker.
 
-Checks if the webui and hermes-agent git repos are behind their upstream
-branches. Results are cached server-side (30-min TTL) so git fetch runs
+Checks if the webui and hermes-agent git repos are behind their latest
+release tags. Results are cached server-side (30-min TTL) so git fetch runs
 at most twice per hour regardless of client count.
 
 Skips repos that are not git checkouts (e.g. Docker baked images where
@@ -86,6 +86,24 @@ def _run_git(args, cwd, timeout=10):
         return f'git failed to start: {exc}', False
 
 
+def _dirty_suffix(path: Path, timeout=1) -> str:
+    """Return a best-effort ``-dirty`` suffix without blocking version display."""
+    out, ok = _run_git(['diff-index', '--quiet', 'HEAD', '--'], path, timeout=timeout)
+    if ok:
+        return ""
+    # diff-index exits 1 with no output for a dirty tree. Timeouts and real git
+    # failures include a diagnostic; skip the suffix so the base version remains.
+    return "-dirty" if not out else ""
+
+
+def _describe_git_version(path: Path, *, timeout=5, dirty_timeout=1) -> str | None:
+    """Return a fast git version string for a checkout, if available."""
+    out, ok = _run_git(['describe', '--tags', '--always'], path, timeout=timeout)
+    if not (ok and out):
+        return None
+    return out + _dirty_suffix(path, timeout=dirty_timeout)
+
+
 def _detect_webui_version() -> str:
     """Detect the running WebUI version from git or a baked-in fallback file.
 
@@ -101,8 +119,8 @@ def _detect_webui_version() -> str:
     """
     # Timeout capped at 3s: git describe on a healthy local repo is <50ms;
     # a 10s stall on import (NFS-mounted .git, broken git binary) is unacceptable.
-    out, ok = _run_git(['describe', '--tags', '--always', '--dirty'], REPO_ROOT, timeout=3)
-    if ok and out:
+    out = _describe_git_version(REPO_ROOT)
+    if out:
         return out
 
     # Docker / baked-image fallback: api/_version.py written by CI at build time.
@@ -145,8 +163,8 @@ def _detect_agent_version() -> str:
     # Symmetric with _detect_webui_version() above — `--dirty` flags a
     # locally-modified checkout so operators can see when their agent has
     # uncommitted changes vs a clean tag. Per Opus advisor on stage-293.
-    out, ok = _run_git(['describe', '--tags', '--always', '--dirty'], _AGENT_DIR, timeout=3)
-    if ok and out:
+    out = _describe_git_version(Path(_AGENT_DIR))
+    if out:
         return out
 
     return 'not detected'
@@ -211,15 +229,65 @@ def _detect_default_branch(path):
     return 'master'
 
 
-def _check_repo(path, name):
-    """Check if a git repo is behind its upstream. Returns dict or None."""
-    if path is None or not (path / '.git').exists():
+def _release_tags(path):
+    """Return release tags newest-first, using the repo's version-sort order."""
+    out, ok = _run_git(['tag', '--list', 'v*', '--sort=-v:refname'], path)
+    if not (ok and out):
+        return []
+    return [line.strip() for line in out.splitlines() if line.strip()]
+
+
+def _current_release_tag(path):
+    """Return the latest release tag reachable from HEAD, if one exists."""
+    out, ok = _run_git(['describe', '--tags', '--abbrev=0'], path)
+    return out if ok and out else None
+
+
+def _release_gap(tags, current, latest):
+    """Count release tags between current and latest in a newest-first list."""
+    if not latest or current == latest:
+        return 0
+    if current in tags:
+        return tags.index(current)
+    return 1
+
+
+def _check_repo_release(path, name):
+    """Check if a git repo is behind its latest published release tag."""
+    tags = _release_tags(path)
+    if not tags:
         return None
 
+    latest_tag = tags[0]
+    current_tag = _current_release_tag(path)
+    behind = _release_gap(tags, current_tag, latest_tag)
+
+    remote_url, _ = _run_git(['remote', 'get-url', 'origin'], path)
+    remote_url = _normalize_remote_url(remote_url)
+
+    return {
+        'name': name,
+        'behind': behind,
+        # GitHub compare URLs accept tag names, and tag-to-tag links are the
+        # clearest "what changed in this release?" view for operators.
+        'current_sha': current_tag,
+        'latest_sha': latest_tag,
+        'branch': latest_tag,
+        'repo_url': remote_url,
+        'release_based': True,
+        'current_version': current_tag,
+        'latest_version': latest_tag,
+    }
+
+
+def _check_repo_branch(path, name, *, fetch=True):
+    """Fallback: check if a git repo is behind its upstream branch."""
+
     # Fetch latest from origin (network call, cached by TTL)
-    _, fetch_ok = _run_git(['fetch', 'origin', '--quiet'], path, timeout=15)
-    if not fetch_ok:
-        return {'name': name, 'behind': 0, 'error': 'fetch failed'}
+    if fetch:
+        _, fetch_ok = _run_git(['fetch', 'origin', '--quiet'], path, timeout=15)
+        if not fetch_ok:
+            return {'name': name, 'behind': 0, 'error': 'fetch failed'}
 
     # Use the current branch's upstream tracking branch, not the repo default.
     # This avoids false "N updates behind" alerts when the user is on a feature
@@ -283,6 +351,24 @@ def _check_repo(path, name):
     }
 
 
+def _check_repo(path, name):
+    """Check if a git repo is behind its latest release. Returns dict or None."""
+    if path is None or not (path / '.git').exists():
+        return None
+
+    # Fetch tags first so update prompts track published releases, not every
+    # development commit that lands on master/main after the latest release.
+    _, fetch_ok = _run_git(['fetch', 'origin', '--quiet', '--tags'], path, timeout=15)
+    if not fetch_ok:
+        return {'name': name, 'behind': 0, 'error': 'fetch failed'}
+
+    release_info = _check_repo_release(path, name)
+    if release_info is not None:
+        return release_info
+
+    return _check_repo_branch(path, name, fetch=False)
+
+
 def check_for_updates(force=False):
     """Return cached update status for webui and agent repos."""
     global _check_in_progress
@@ -317,22 +403,31 @@ def _repo_path_for_update_target(target: str):
 
 def _commit_subjects_for_update(info: dict, *, limit: int = 24) -> list[str]:
     """Return commit subjects for an update range, if the local git refs exist."""
+    subjects, _truncated = _commit_subjects_for_update_with_limit(info, limit=limit)
+    return subjects
+
+
+def _commit_subjects_for_update_with_limit(info: dict, *, limit: int = 24) -> tuple[list[str], bool]:
+    """Return recent commit subjects plus whether the local list was capped."""
     if not isinstance(info, dict):
-        return []
+        return [], False
     target = info.get('name')
     if target not in ('webui', 'agent'):
         target = 'webui' if info.get('repo_url', '').endswith('hermes-webui') else target
     path = _repo_path_for_update_target(target)
     if path is None or not (Path(path) / '.git').exists():
-        return []
+        return [], False
     current = str(info.get('current_sha') or '').strip()
     latest = str(info.get('latest_sha') or '').strip()
     if not (current and latest):
-        return []
-    out, ok = _run_git(['log', '--format=%s', f'{current}..{latest}', f'-n{limit}'], path, timeout=5)
+        return [], False
+    probe_limit = max(1, int(limit)) + 1
+    out, ok = _run_git(['log', '--format=%s', f'{current}..{latest}', f'-n{probe_limit}'], path, timeout=5)
     if not ok or not out:
-        return []
-    return [line.strip() for line in out.splitlines() if line.strip()]
+        return [], False
+    subjects = [line.strip() for line in out.splitlines() if line.strip()]
+    truncated = len(subjects) > limit
+    return subjects[:limit], truncated
 
 
 def _summary_cache_key(updates: dict, details: list[dict]) -> str:
@@ -360,11 +455,34 @@ def _clean_summary_bullet(line: str) -> str:
     return line[:240]
 
 
+def _split_summary_category(line: str) -> tuple[str | None, str]:
+    raw = str(line or '').strip()
+    match = re.match(r'^\s*(?:[-*•]+|\d+[.)])?\s*(notice|what you(?:ll|\'ll| will) notice|user(?:s)? will notice|worth knowing|worth|note)\s*:\s*(.+)$', raw, re.I)
+    if not match:
+        return None, raw
+    label = match.group(1).lower()
+    category = 'worth' if label in {'worth knowing', 'worth', 'note'} else 'notice'
+    return category, match.group(2)
+
+
+def _unique_summary_bullets(items: list[str]) -> list[str]:
+    seen = set()
+    bullets = []
+    for item in items:
+        cleaned = _clean_summary_bullet(item)
+        key = cleaned.lower()
+        if cleaned and key not in seen:
+            bullets.append(cleaned)
+            seen.add(key)
+    return bullets
+
+
 def _summary_bullets_from_text(text: str, *, fallback_items: list[str]) -> list[str]:
     raw = str(text or '').strip()
     candidates = []
     for line in raw.splitlines():
-        cleaned = _clean_summary_bullet(line)
+        _category, body = _split_summary_category(line)
+        cleaned = _clean_summary_bullet(body)
         if cleaned:
             candidates.append(cleaned)
     if len(candidates) <= 1 and raw:
@@ -372,16 +490,22 @@ def _summary_bullets_from_text(text: str, *, fallback_items: list[str]) -> list[
         candidates = [item for item in candidates if item]
     if not candidates:
         candidates = [_clean_summary_bullet(item) for item in fallback_items]
-    seen = set()
-    bullets = []
-    for item in candidates:
-        key = item.lower()
-        if item and key not in seen:
-            bullets.append(item)
-            seen.add(key)
-        if len(bullets) >= 5:
-            break
+    bullets = _unique_summary_bullets(candidates)
     return bullets or ['Updates are available.']
+
+
+def _categorized_summary_bullets_from_text(text: str) -> tuple[list[str], list[str]]:
+    notice_items: list[str] = []
+    worth_items: list[str] = []
+    for line in str(text or '').splitlines():
+        category, body = _split_summary_category(line)
+        if category == 'notice':
+            notice_items.append(body)
+        elif category == 'worth':
+            worth_items.append(body)
+        elif re.match(r'^\s*(?:[-*•]+|\d+[.)])?\s*[A-Za-z][A-Za-z ]{1,32}\s*:', str(line or '')):
+            notice_items.append(body)
+    return _unique_summary_bullets(notice_items), _unique_summary_bullets(worth_items)
 
 
 def _fallback_update_bullets(details: list[dict]) -> list[str]:
@@ -392,13 +516,25 @@ def _fallback_update_bullets(details: list[dict]) -> list[str]:
         commits = item.get('commits') or []
         if commits:
             highlights = '; '.join(commits[:3])
-            bullets.append(f"{label} has {behind} update(s), including: {highlights}.")
+            qualifier = 'recent updates' if item.get('commits_truncated') else 'updates'
+            bullets.append(f"{label} has {behind} update(s), including {qualifier}: {highlights}.")
         else:
             bullets.append(f"{label} has {behind} update(s) available.")
     return bullets or ['Updates are available.']
 
 
 def _worth_knowing_bullets(details: list[dict]) -> list[str]:
+    items = []
+    truncated = [item for item in details if item.get('commits_truncated') and item.get('commits_limit')]
+    for item in truncated[:2]:
+        label = item.get('label') or item.get('name') or 'Hermes'
+        behind = item.get('behind') or 0
+        limit = item.get('commits_limit') or len(item.get('commits') or [])
+        items.append(
+            f"{label} has {behind} updates; this summary uses the latest {limit} commit subjects, with the full comparison still available in the diff link."
+        )
+    if items:
+        return items
     targets = [
         f"{item.get('label') or item.get('name') or 'Hermes'} ({item.get('behind') or 0} update{'s' if (item.get('behind') or 0) != 1 else ''})"
         for item in details
@@ -406,30 +542,32 @@ def _worth_knowing_bullets(details: list[dict]) -> list[str]:
     ]
     if len(targets) > 1:
         return ['This summary combines updates from ' + ' and '.join(targets) + '.']
-    if targets:
-        return ['This summary covers ' + targets[0] + '.']
-    return ['No update details were available to summarize.']
+    return []
 
 
 def _format_update_summary_sections(summary_text: str, details: list[dict]) -> tuple[list[dict], str]:
-    bullets = _summary_bullets_from_text(summary_text, fallback_items=_fallback_update_bullets(details))
-    if len(bullets) > 1:
-        notice_items = bullets[:3]
-        worth_items = bullets[3:] or bullets[1:]
-    else:
-        notice_items = bullets
-        worth_items = []
-    worth_items = worth_items[:2] or _worth_knowing_bullets(details)
+    notice_items, worth_items = _categorized_summary_bullets_from_text(summary_text)
+    if not notice_items:
+        notice_items = _summary_bullets_from_text(summary_text, fallback_items=_fallback_update_bullets(details))
+    notice_keys = {item.lower() for item in notice_items}
+    worth_items = [item for item in worth_items if item.lower() not in notice_keys]
+    worth_items.extend(
+        item for item in _worth_knowing_bullets(details)
+        if item.lower() not in notice_keys and item.lower() not in {existing.lower() for existing in worth_items}
+    )
     sections = [
         {
             'title': "What you'll notice",
             'items': notice_items,
         },
-        {
-            'title': 'Worth knowing',
-            'items': worth_items,
-        },
     ]
+    if worth_items:
+        sections.append(
+            {
+                'title': 'Worth knowing',
+                'items': worth_items,
+            }
+        )
     lines = []
     for section in sections:
         lines.append(section['title'])
@@ -451,15 +589,22 @@ def _update_summary_prompt(details: list[dict]) -> tuple[str, str]:
         "Return only bullets. Do not include headings, markdown tables, intro paragraphs, or closing notes."
     )
     user_lines = [
-        "Summarize these available updates as 3-5 concise bullets.",
+        "Summarize these available updates as concise bullets.",
+        "Prefix each bullet with `Notice:` for user-visible behavior changes or `Worth knowing:` for useful context.",
+        "Put user-visible Notice bullets first and include every meaningful user-facing change from the available commit subjects.",
+        "Use Worth knowing only for helpful context that is not a duplicate of a Notice bullet.",
         "Use everyday language and explain visible behavior changes, not code mechanics.",
-        "Return only bullets; the WebUI will add the fixed section headings separately.",
+        "Return only prefixed bullets; the WebUI will add the fixed section headings separately.",
         "",
     ]
     for item in details:
         user_lines.append(f"{item['label']}: {item['behind']} commit(s) behind")
         commits = item.get('commits') or []
         if commits:
+            if item.get('commits_truncated'):
+                user_lines.append(
+                    f"- Showing latest {len(commits)} of {item['behind']} commit subjects; summarize trends, not every commit."
+                )
             user_lines.extend(f"- {subject}" for subject in commits)
         else:
             user_lines.append("- No local commit subjects available; summarize only the update count.")
@@ -486,14 +631,19 @@ def summarize_update_payload(updates: dict, llm_callback=None, *, target: str | 
         info = updates.get(key)
         if not isinstance(info, dict) or int(info.get('behind') or 0) <= 0:
             continue
+        commit_limit = 24
+        commits, commits_truncated = _commit_subjects_for_update_with_limit({'name': key, **info}, limit=commit_limit)
+        behind = int(info.get('behind') or 0)
         item = {
             'name': key,
             'label': label,
-            'behind': int(info.get('behind') or 0),
+            'behind': behind,
             'current_sha': info.get('current_sha'),
             'latest_sha': info.get('latest_sha'),
             'compare_url': info.get('compare_url'),
-            'commits': _commit_subjects_for_update({'name': key, **info}),
+            'commits': commits,
+            'commits_limit': commit_limit,
+            'commits_truncated': bool(commits_truncated or (commits and behind > len(commits))),
         }
         details.append(item)
     cache_key = _summary_cache_key(updates, details)

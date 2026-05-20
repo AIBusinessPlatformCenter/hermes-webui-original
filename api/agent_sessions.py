@@ -9,6 +9,7 @@ logger = logging.getLogger(__name__)
 
 MESSAGING_SOURCES = {
     'discord',
+    'email',
     'slack',
     'telegram',
     'weixin',
@@ -22,6 +23,7 @@ SOURCE_LABELS = {
     'cli': 'CLI',
     'cron': 'Cron',
     'discord': 'Discord',
+    'email': 'Email',
     'slack': 'Slack',
     'telegram': 'Telegram',
     'tool': 'Tool',
@@ -682,6 +684,10 @@ def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[st
         row = rows.get(sid)
         if not row:
             continue
+
+        state_title = str(row.get('title') or '').strip()
+        if state_title:
+            metadata.setdefault(sid, {})['_state_db_title'] = state_title
 
         parent_id = row.get('parent_session_id')
         parent_row = rows.get(parent_id) if parent_id else None

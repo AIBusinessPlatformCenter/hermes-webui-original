@@ -19,7 +19,12 @@ from api.config import (
     get_effective_default_model, _get_session_agent_lock,
 )
 from api.workspace import get_last_workspace
-from api.agent_sessions import read_importable_agent_session_rows, read_session_lineage_metadata
+from api.usage import prompt_cache_hit_percent
+from api.agent_sessions import (
+    _is_continuation_session,
+    read_importable_agent_session_rows,
+    read_session_lineage_metadata,
+)
 
 logger = logging.getLogger(__name__)
 CLI_VISIBLE_SESSION_LIMIT = 20
@@ -199,6 +204,42 @@ def _active_stream_ids():
         return set(STREAMS.keys())
 
 
+def _append_recovered_turn_to_context(session, recovered: dict) -> None:
+    context_messages = getattr(session, 'context_messages', None)
+    if not isinstance(context_messages, list) or not context_messages:
+        return
+    recovered_text = " ".join(str(recovered.get('content') or '').split())
+    if recovered_text:
+        for existing in reversed(context_messages[-8:]):
+            if not isinstance(existing, dict) or existing.get('role') != 'user':
+                continue
+            existing_text = " ".join(str(existing.get('content') or '').split())
+            if existing_text == recovered_text:
+                return
+    context_entry = {k: v for k, v in recovered.items() if k != 'timestamp'}
+    context_messages.append(context_entry)
+
+
+def _append_recovered_pending_turn(session, *, timestamp: int | None = None) -> dict | None:
+    pending_text = str(session.pending_user_message or '')
+    if not pending_text:
+        return None
+    recovered_ts = int(time.time())
+    if isinstance(timestamp, (int, float)) and timestamp > 0:
+        recovered_ts = int(timestamp)
+    recovered: dict = {
+        'role': 'user',
+        'content': session.pending_user_message,
+        'timestamp': recovered_ts,
+        '_recovered': True,
+    }
+    if session.pending_attachments:
+        recovered['attachments'] = list(session.pending_attachments)
+    session.messages.append(recovered)
+    _append_recovered_turn_to_context(session, recovered)
+    return recovered
+
+
 def _is_streaming_session(active_stream_id, active_stream_ids):
     return bool(active_stream_id and active_stream_id in active_stream_ids)
 
@@ -325,6 +366,7 @@ class Session:
                  tool_calls=None, pinned: bool=False, archived: bool=False,
                  project_id: str=None, profile=None,
                  input_tokens: int=0, output_tokens: int=0, estimated_cost=None,
+                 cache_read_tokens: int=0, cache_write_tokens: int=0,
                  personality=None,
                  active_stream_id: str=None,
                  pending_user_message: str=None,
@@ -334,6 +376,12 @@ class Session:
                  compression_anchor_visible_idx=None,
                  compression_anchor_message_key=None,
                  compression_anchor_summary=None,
+                 pre_compression_snapshot: bool=False,
+                 context_engine=None,
+                 compression_anchor_engine=None,
+                 compression_anchor_mode=None,
+                 compression_anchor_details=None,
+                 context_engine_state=None,
                  context_length=None, threshold_tokens=None,
                  last_prompt_tokens=None,
                  gateway_routing=None, gateway_routing_history=None,
@@ -362,6 +410,8 @@ class Session:
         self.input_tokens = input_tokens or 0
         self.output_tokens = output_tokens or 0
         self.estimated_cost = estimated_cost
+        self.cache_read_tokens = cache_read_tokens or 0
+        self.cache_write_tokens = cache_write_tokens or 0
         self.personality = personality
         self.active_stream_id = active_stream_id
         self.pending_user_message = pending_user_message
@@ -371,6 +421,12 @@ class Session:
         self.compression_anchor_visible_idx = compression_anchor_visible_idx
         self.compression_anchor_message_key = compression_anchor_message_key
         self.compression_anchor_summary = compression_anchor_summary
+        self.pre_compression_snapshot = bool(pre_compression_snapshot)
+        self.context_engine = context_engine
+        self.compression_anchor_engine = compression_anchor_engine
+        self.compression_anchor_mode = compression_anchor_mode
+        self.compression_anchor_details = compression_anchor_details if isinstance(compression_anchor_details, dict) else {}
+        self.context_engine_state = context_engine_state if isinstance(context_engine_state, dict) else {}
         self.context_length = context_length
         self.threshold_tokens = threshold_tokens
         self.last_prompt_tokens = last_prompt_tokens
@@ -390,7 +446,14 @@ class Session:
         self.read_only = bool(kwargs.get('read_only', False))
         self.enabled_toolsets = enabled_toolsets  # List[str] or None — per-session toolset override
         self.composer_draft = composer_draft if isinstance(composer_draft, dict) else {}
-        self._metadata_message_count = None
+        raw_message_count = kwargs.get('message_count')
+        parsed_message_count = None
+        if raw_message_count is not None:
+            try:
+                parsed_message_count = int(raw_message_count)
+            except (TypeError, ValueError):
+                parsed_message_count = None
+        self._metadata_message_count = parsed_message_count if parsed_message_count is not None and parsed_message_count >= 0 else None
 
     @property
     def path(self):
@@ -423,10 +486,13 @@ class Session:
             'session_id', 'title', 'workspace', 'model', 'model_provider', 'created_at', 'updated_at',
             'pinned', 'archived', 'project_id', 'profile',
             'input_tokens', 'output_tokens', 'estimated_cost',
+            'cache_read_tokens', 'cache_write_tokens',
             'personality', 'active_stream_id',
             'pending_user_message', 'pending_attachments', 'pending_started_at',
             'compression_anchor_visible_idx', 'compression_anchor_message_key',
-            'compression_anchor_summary',
+            'compression_anchor_summary', 'pre_compression_snapshot',
+            'context_engine', 'compression_anchor_engine', 'compression_anchor_mode',
+            'compression_anchor_details', 'context_engine_state',
             'context_length', 'threshold_tokens', 'last_prompt_tokens',
             'gateway_routing', 'gateway_routing_history', 'llm_title_generated',
             'parent_session_id',
@@ -516,7 +582,18 @@ class Session:
         p = SESSION_DIR / f'{sid}.json'
         if not p.exists():
             return None
-        return cls(**json.loads(p.read_text(encoding='utf-8')))
+        data = json.loads(p.read_text(encoding='utf-8'))
+        data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
+        session = cls(**data)
+        if _collapsed_partials:
+            try:
+                # Self-heal bloated sessions on first full load without touching
+                # recency/index ordering; save() creates a .bak because this
+                # intentionally shrinks the transcript (#2592).
+                session.save(touch_updated_at=False, skip_index=True)
+            except Exception:
+                logger.debug("Failed to persist collapsed duplicate partials for %s", sid, exc_info=True)
+        return session
 
     @classmethod
     def load_metadata_only(cls, sid):
@@ -543,7 +620,19 @@ class Session:
             parsed['messages'] = []
             parsed['tool_calls'] = []
             session = cls(**parsed)
-            session._metadata_message_count = _lookup_index_message_count(sid)
+            metadata_message_count = _lookup_index_message_count(sid)
+            if metadata_message_count is None:
+                raw_count = parsed.get('message_count')
+                if isinstance(raw_count, int) and raw_count >= 0:
+                    metadata_message_count = raw_count
+                else:
+                    try:
+                        parsed_count = int(raw_count)
+                    except (TypeError, ValueError):
+                        parsed_count = None
+                    if parsed_count is not None and parsed_count >= 0:
+                        metadata_message_count = parsed_count
+            session._metadata_message_count = metadata_message_count
             # Mark this session as a metadata-only stub. save() refuses to write
             # such a session because doing so would atomically replace the
             # on-disk JSON with messages=[], wiping the conversation. Any
@@ -586,10 +675,19 @@ class Session:
             'input_tokens': self.input_tokens,
             'output_tokens': self.output_tokens,
             'estimated_cost': self.estimated_cost,
+            'cache_read_tokens': self.cache_read_tokens,
+            'cache_write_tokens': self.cache_write_tokens,
+            'cache_hit_percent': prompt_cache_hit_percent(self.cache_read_tokens, self.input_tokens),
             'personality': self.personality,
             'compression_anchor_visible_idx': self.compression_anchor_visible_idx,
             'compression_anchor_message_key': self.compression_anchor_message_key,
             'compression_anchor_summary': self.compression_anchor_summary,
+            'pre_compression_snapshot': self.pre_compression_snapshot,
+            'context_engine': self.context_engine,
+            'compression_anchor_engine': self.compression_anchor_engine,
+            'compression_anchor_mode': self.compression_anchor_mode,
+            'compression_anchor_details': self.compression_anchor_details,
+            'context_engine_state': self.context_engine_state,
             'context_length': self.context_length,
             'threshold_tokens': self.threshold_tokens,
             'last_prompt_tokens': self.last_prompt_tokens,
@@ -636,12 +734,317 @@ def _get_profile_home(profile) -> Path:
         return Path(os.environ.get('HERMES_HOME') or '~/.hermes').expanduser()
 
 
+def _interrupted_recovery_marker(*, recovered_output: bool = False) -> dict:
+    if recovered_output:
+        content = (
+            '**Response interrupted.**\n\n'
+            'The WebUI process restarted before this turn finished. '
+            'The partial output above was recovered from the run journal, '
+            'but the interrupted agent process could not continue.'
+        )
+    else:
+        content = (
+            '**Response interrupted.**\n\n'
+            'The WebUI process restarted before this turn finished. '
+            'The user message above was preserved, but no agent output was recovered.'
+        )
+    return {
+        'role': 'assistant',
+        'content': content,
+        'timestamp': int(time.time()),
+        '_error': True,
+        'type': 'interrupted',
+    }
+
+
+def _truncate_journal_tool_args(args, limit: int = 4) -> dict:
+    if not isinstance(args, dict):
+        return {}
+    out = {}
+    for key, value in list(args.items())[:limit]:
+        text = str(value)
+        out[str(key)] = text[:120] + ('...' if len(text) > 120 else '')
+    return out
+
+
+def _normalize_journal_recovery_text(value) -> str:
+    return " ".join(str(value or "").split())
+
+
+def _partial_message_signature(message: dict) -> tuple:
+    """Return a stable identity for partial assistant markers recovered on load."""
+    if not isinstance(message, dict):
+        return ('', '', ())
+    tool_sig = []
+    for tool_call in message.get('_partial_tool_calls') or []:
+        if not isinstance(tool_call, dict):
+            continue
+        try:
+            args_sig = json.dumps(
+                tool_call.get('args') or {},
+                ensure_ascii=False,
+                sort_keys=True,
+                default=str,
+            )
+        except Exception:
+            args_sig = str(tool_call.get('args') or '')
+        tool_sig.append((
+            str(tool_call.get('name') or ''),
+            args_sig,
+            bool(tool_call.get('done', False)),
+            bool(tool_call.get('is_error', False)),
+            str(tool_call.get('preview') or tool_call.get('snippet') or ''),
+        ))
+    return (
+        str(message.get('content') or '').strip(),
+        str(message.get('reasoning') or '').strip(),
+        tuple(tool_sig),
+    )
+
+
+def _collapse_adjacent_duplicate_partials(messages) -> tuple[list, bool]:
+    """Collapse repeated identical partial markers from the same failed turn."""
+    if not isinstance(messages, list):
+        return messages, False
+    collapsed = []
+    changed = False
+    previous_partial_sig = None
+    for message in messages:
+        if isinstance(message, dict) and message.get('_partial'):
+            sig = _partial_message_signature(message)
+            if previous_partial_sig == sig:
+                changed = True
+                continue
+            previous_partial_sig = sig
+        else:
+            previous_partial_sig = None
+        collapsed.append(message)
+    return collapsed, changed
+
+
+def _find_existing_assistant_for_journal_content(session, content: str) -> int | None:
+    candidate = _normalize_journal_recovery_text(content)
+    if not candidate:
+        return None
+    for idx, message in enumerate(session.messages or []):
+        if not isinstance(message, dict) or message.get('role') != 'assistant':
+            continue
+        if message.get('_error'):
+            continue
+        existing = _normalize_journal_recovery_text(message.get('content'))
+        if not existing:
+            continue
+        if existing == candidate:
+            return idx
+        if len(candidate) >= 24 and candidate in existing:
+            return idx
+    return None
+
+
+def _journal_tool_already_present(session, name: str, preview: str) -> bool:
+    candidate_name = str(name or '')
+    candidate_preview = _normalize_journal_recovery_text(preview)
+    for tool_call in session.tool_calls or []:
+        if not isinstance(tool_call, dict):
+            continue
+        if str(tool_call.get('name') or '') != candidate_name:
+            continue
+        existing_preview = _normalize_journal_recovery_text(
+            tool_call.get('preview') or tool_call.get('snippet') or ''
+        )
+        if existing_preview == candidate_preview:
+            return True
+    return False
+
+
+def _run_journal_has_visible_output(session, stream_id: str | None) -> bool:
+    if not stream_id:
+        return False
+    try:
+        from api.run_journal import read_run_events
+        journal = read_run_events(session.session_id, stream_id)
+    except Exception:
+        return False
+    for event in journal.get('events') or []:
+        if not isinstance(event, dict):
+            continue
+        event_name = str(event.get('event') or event.get('type') or '')
+        payload = event.get('payload') if isinstance(event.get('payload'), dict) else {}
+        if event_name == 'token' and str(payload.get('text') or ''):
+            return True
+        if event_name == 'interim_assistant':
+            if payload.get('already_streamed'):
+                continue
+            if str(payload.get('text') or '').strip():
+                return True
+        if event_name == 'tool':
+            return True
+    return False
+
+
+def _append_journaled_partial_output(
+    session,
+    stream_id: str | None,
+    *,
+    dedupe_existing: bool = False,
+) -> bool:
+    """Recover already-emitted visible output from a dead stream journal.
+
+    This repair path is intentionally conservative: it restores user-visible
+    assistant text and tool-card metadata that had already been emitted over
+    SSE before the WebUI process died. It does not restore hidden reasoning and
+    it does not try to continue execution.
+    """
+    if not stream_id:
+        return False
+
+    try:
+        from api.run_journal import read_run_events
+        journal = read_run_events(session.session_id, stream_id)
+    except Exception:
+        logger.debug(
+            "Session %s: failed to read run journal for stream %s",
+            getattr(session, 'session_id', '?'),
+            stream_id,
+            exc_info=True,
+        )
+        return False
+
+    events = [event for event in journal.get('events') or [] if isinstance(event, dict)]
+    if not events:
+        return False
+
+    appended_any = False
+    assistant_parts: list[str] = []
+    assistant_started_at: float | None = None
+    current_assistant_idx: int | None = None
+    recovered_tool_calls: list[dict] = []
+
+    def flush_assistant() -> int | None:
+        nonlocal appended_any, assistant_parts, assistant_started_at, current_assistant_idx
+        content = ''.join(assistant_parts).strip()
+        assistant_parts = []
+        if not content:
+            return current_assistant_idx
+        if dedupe_existing:
+            existing_idx = _find_existing_assistant_for_journal_content(session, content)
+            if existing_idx is not None:
+                current_assistant_idx = existing_idx
+                assistant_started_at = None
+                return existing_idx
+        timestamp = int(assistant_started_at or time.time())
+        session.messages.append({
+            'role': 'assistant',
+            'content': content,
+            'timestamp': timestamp,
+            '_recovered_from_run_journal': True,
+            '_recovered_stream_id': stream_id,
+        })
+        current_assistant_idx = len(session.messages) - 1
+        assistant_started_at = None
+        appended_any = True
+        return current_assistant_idx
+
+    def ensure_assistant_anchor(created_at: float | None = None) -> int:
+        nonlocal appended_any, current_assistant_idx
+        idx = flush_assistant()
+        if idx is not None:
+            return idx
+        # A stream can start with tools before any text. Keep those tools
+        # visible after restart with an empty recovered assistant anchor instead
+        # of inventing synthetic progress prose.
+        session.messages.append({
+            'role': 'assistant',
+            'content': '',
+            'timestamp': int(created_at or time.time()),
+            '_recovered_from_run_journal': True,
+            '_recovered_stream_id': stream_id,
+        })
+        current_assistant_idx = len(session.messages) - 1
+        appended_any = True
+        return current_assistant_idx
+
+    for event in events:
+        event_name = str(event.get('event') or event.get('type') or '')
+        payload = event.get('payload') if isinstance(event.get('payload'), dict) else {}
+        created_at = event.get('created_at') if isinstance(event.get('created_at'), (int, float)) else None
+        if event_name == 'token':
+            text = str(payload.get('text') or '')
+            if not text:
+                continue
+            if not assistant_parts and assistant_started_at is None:
+                assistant_started_at = created_at or time.time()
+            assistant_parts.append(text)
+            continue
+        if event_name == 'interim_assistant':
+            if payload.get('already_streamed'):
+                flush_assistant()
+                continue
+            text = str(payload.get('text') or '').strip()
+            if not text:
+                continue
+            if not assistant_parts and assistant_started_at is None:
+                assistant_started_at = created_at or time.time()
+            if assistant_parts and not ''.join(assistant_parts).endswith(('\n', ' ')):
+                assistant_parts.append('\n\n')
+            assistant_parts.append(text)
+            flush_assistant()
+            continue
+        if event_name == 'tool':
+            anchor_idx = flush_assistant()
+            if anchor_idx is None:
+                anchor_idx = ensure_assistant_anchor(created_at)
+            name = str(payload.get('name') or 'tool')
+            preview = str(payload.get('preview') or '')
+            if dedupe_existing and _journal_tool_already_present(session, name, preview):
+                current_assistant_idx = anchor_idx
+                continue
+            recovered_tool_calls.append({
+                'name': name,
+                'preview': preview,
+                'snippet': preview,
+                'tid': f"journal-{event.get('seq') or len(recovered_tool_calls) + 1}",
+                'assistant_msg_idx': anchor_idx,
+                'args': _truncate_journal_tool_args(payload.get('args') or {}),
+                'done': False,
+                '_recovered_from_run_journal': True,
+                '_recovered_stream_id': stream_id,
+            })
+            appended_any = True
+            current_assistant_idx = anchor_idx
+            continue
+        if event_name == 'tool_complete':
+            name = str(payload.get('name') or '')
+            for tool_call in reversed(recovered_tool_calls):
+                if tool_call.get('done'):
+                    continue
+                if not name or tool_call.get('name') == name:
+                    tool_call['done'] = True
+                    if payload.get('preview'):
+                        tool_call['preview'] = str(payload.get('preview') or '')
+                        tool_call['snippet'] = str(payload.get('preview') or '')
+                    if payload.get('duration') is not None:
+                        tool_call['duration'] = payload.get('duration')
+                    tool_call['is_error'] = bool(payload.get('is_error', False))
+                    break
+            continue
+        if event_name in {'done', 'stream_end', 'cancel', 'apperror', 'error'}:
+            flush_assistant()
+
+    flush_assistant()
+    if recovered_tool_calls:
+        session.tool_calls = list(session.tool_calls or []) + recovered_tool_calls
+        appended_any = True
+    return appended_any
+
+
 def _apply_core_sync_or_error_marker(
     session,
     core_path,
     stream_id_for_recheck=None,
     *,
     require_stream_dead=True,
+    touch_updated_at=True,
 ) -> bool:
     """Inner repair logic. Must be called with the per-session lock already held.
 
@@ -688,26 +1091,26 @@ def _apply_core_sync_or_error_marker(
         if isinstance(session.pending_started_at, (int, float)) and session.pending_started_at > 0:
             _recovered_ts = int(session.pending_started_at)
         if not _already_checkpointed:
+            _append_recovered_pending_turn(session, timestamp=_recovered_ts)
+        else:
             recovered = {
                 'role': 'user',
                 'content': session.pending_user_message,
-                'timestamp': _recovered_ts,
                 '_recovered': True,
             }
             if session.pending_attachments:
                 recovered['attachments'] = list(session.pending_attachments)
-            session.messages.append(recovered)
+            _append_recovered_turn_to_context(session, recovered)
+        recovered_output = _append_journaled_partial_output(
+            session,
+            stream_id_for_recheck or session.active_stream_id,
+        )
         session.active_stream_id = None
         session.pending_user_message = None
         session.pending_attachments = []
         session.pending_started_at = None
-        session.messages.append({
-            'role': 'assistant',
-            'content': '**Previous turn did not complete.**',
-            'timestamp': int(time.time()),
-            '_error': True,
-        })
-        session.save()
+        session.messages.append(_interrupted_recovery_marker(recovered_output=recovered_output))
+        session.save(touch_updated_at=touch_updated_at)
         logger.info(
             "Session %s: recovered pending user turn (messages non-empty), added error marker",
             sid,
@@ -721,19 +1124,48 @@ def _apply_core_sync_or_error_marker(
             core = json.load(f)
         core_messages = core.get('messages', [])
         if core_messages:
+            _stream_id = stream_id_for_recheck or session.active_stream_id
             session.messages = core_messages
             session.tool_calls = core.get('tool_calls', [])
             for field in ('input_tokens', 'output_tokens', 'estimated_cost'):
                 if core.get(field) is not None:
                     setattr(session, field, core[field])
+            _pending_text = _normalize_journal_recovery_text(session.pending_user_message)
+            _already_checkpointed = False
+            if _pending_text and session.messages:
+                for _last_msg in reversed(session.messages):
+                    if isinstance(_last_msg, dict) and _last_msg.get('role') == 'user':
+                        _last_text = _normalize_journal_recovery_text(_last_msg.get('content'))
+                        _already_checkpointed = _last_text == _pending_text
+                        break
+            if (
+                _pending_text
+                and not _already_checkpointed
+                and _run_journal_has_visible_output(session, _stream_id)
+            ):
+                _recovered_ts = int(time.time())
+                if isinstance(session.pending_started_at, (int, float)) and session.pending_started_at > 0:
+                    _recovered_ts = int(session.pending_started_at)
+                _append_recovered_pending_turn(session, timestamp=_recovered_ts)
+            recovered_output = _append_journaled_partial_output(
+                session,
+                _stream_id,
+                dedupe_existing=True,
+            )
             session.active_stream_id = None
             session.pending_user_message = None
             session.pending_attachments = []
             session.pending_started_at = None
-            session.save()
+            if recovered_output:
+                session.messages.append(
+                    _interrupted_recovery_marker(recovered_output=True)
+                )
+            session.save(touch_updated_at=touch_updated_at)
             logger.info(
-                "Session %s: synced %d messages from core transcript",
-                sid, len(core_messages),
+                "Session %s: synced %d messages from core transcript%s",
+                sid,
+                len(core_messages),
+                " and recovered journaled output" if recovered_output else "",
             )
             return True
 
@@ -745,26 +1177,17 @@ def _apply_core_sync_or_error_marker(
         _recovered_ts = int(time.time())
         if isinstance(session.pending_started_at, (int, float)) and session.pending_started_at > 0:
             _recovered_ts = int(session.pending_started_at)
-        recovered: dict = {
-            'role': 'user',
-            'content': session.pending_user_message,
-            'timestamp': _recovered_ts,
-            '_recovered': True,
-        }
-        if session.pending_attachments:
-            recovered['attachments'] = list(session.pending_attachments)
-        session.messages.append(recovered)
+        _append_recovered_pending_turn(session, timestamp=_recovered_ts)
+    recovered_output = _append_journaled_partial_output(
+        session,
+        stream_id_for_recheck or session.active_stream_id,
+    )
     session.active_stream_id = None
     session.pending_user_message = None
     session.pending_attachments = []
     session.pending_started_at = None
-    session.messages.append({
-        'role': 'assistant',
-        'content': '**Previous turn did not complete.**',
-        'timestamp': int(time.time()),
-        '_error': True,
-    })
-    session.save()
+    session.messages.append(_interrupted_recovery_marker(recovered_output=recovered_output))
+    session.save(touch_updated_at=touch_updated_at)
     logger.info("Session %s: no core transcript found, added error marker", sid)
     return True
 
@@ -775,7 +1198,7 @@ def _apply_core_sync_or_error_marker(
 # pending_user_message and STREAMS.pop(stream_id). Without this guard, any
 # fast turn (e.g. command approval) that exits the thread before the on-disk
 # pending clear has flushed gets misdiagnosed as a crashed turn, producing a
-# spurious "Previous turn did not complete." marker.
+# spurious "Response interrupted." marker.
 #
 # 30s covers the worst-case post-loop persistence window: LLM finishing a tool
 # batch + lock contention with the checkpoint thread + a multi-MB session.save.
@@ -976,7 +1399,110 @@ def _hide_from_default_sidebar(session: dict) -> bool:
     """Return True for internal/background sessions hidden from the default list."""
     sid = str(session.get('session_id') or '')
     source = session.get('source_tag') or session.get('source')
-    return source == 'cron' or sid.startswith('cron_')
+    if source == 'cron' or sid.startswith('cron_'):
+        return True
+    if bool(session.get('pre_compression_snapshot')):
+        return not bool(session.get('_show_pre_compression_snapshot'))
+    return False
+
+
+def _sidebar_message_count(session: dict) -> int:
+    for key in ('message_count', 'actual_message_count'):
+        try:
+            value = int(session.get(key) or 0)
+        except (TypeError, ValueError):
+            value = 0
+        if value > 0:
+            return value
+    return 0
+
+
+def _sidebar_lineage_root_id(session: dict, sessions_by_id: dict[str, dict]) -> str:
+    sid = str(session.get('session_id') or '')
+    root = sid
+    parent = session.get('parent_session_id')
+    seen = {sid}
+    while parent and parent not in seen and parent in sessions_by_id:
+        root = str(parent)
+        seen.add(root)
+        parent = sessions_by_id.get(root, {}).get('parent_session_id')
+    return root
+
+
+def _has_live_sidebar_state(session: dict) -> bool:
+    return bool(
+        session.get('active_stream_id')
+        or session.get('has_pending_user_message')
+        or session.get('pending_user_message')
+    )
+
+
+def _prefer_fuller_snapshots_for_sidebar(sessions: list[dict]) -> list[dict]:
+    """Expose a hidden snapshot when it is the fuller transcript for a lineage.
+
+    Pre-compression snapshots are normally hidden so archived compression
+    segments do not duplicate the current continuation in the sidebar. If a
+    snapshot row has more messages than the visible continuation for the same
+    lineage, hiding it makes the conversation look truncated. In that case,
+    show the fuller snapshot and suppress the shorter inactive continuation.
+    """
+    sessions_by_id = {
+        str(session.get('session_id')): session
+        for session in sessions
+        if session.get('session_id')
+    }
+    groups: dict[str, list[dict]] = {}
+    for session in sessions:
+        sid = str(session.get('session_id') or '')
+        source = session.get('source_tag') or session.get('source')
+        if source == 'cron' or sid.startswith('cron_'):
+            continue
+        root = _sidebar_lineage_root_id(session, sessions_by_id)
+        groups.setdefault(root, []).append(session)
+
+    snapshot_ids_to_show: set[str] = set()
+    continuation_ids_to_hide: set[str] = set()
+    for group in groups.values():
+        visible = [session for session in group if not session.get('pre_compression_snapshot')]
+        snapshots = [session for session in group if session.get('pre_compression_snapshot')]
+        if not visible or not snapshots:
+            continue
+        if any(_has_live_sidebar_state(session) for session in visible):
+            continue
+
+        best_visible_count = max(_sidebar_message_count(session) for session in visible)
+        best_snapshot = max(
+            snapshots,
+            key=lambda session: (_sidebar_message_count(session), _session_sort_timestamp(session)),
+        )
+        if _sidebar_message_count(best_snapshot) <= best_visible_count:
+            continue
+
+        snapshot_ids_to_show.add(str(best_snapshot.get('session_id')))
+        continuation_ids_to_hide.update(
+            str(session.get('session_id'))
+            for session in visible
+            if session.get('session_id')
+        )
+
+    if not snapshot_ids_to_show and not continuation_ids_to_hide:
+        return sessions
+
+    out = []
+    for session in sessions:
+        sid = str(session.get('session_id') or '')
+        if sid in continuation_ids_to_hide:
+            continue
+        if sid in snapshot_ids_to_show:
+            session = dict(session)
+            session['_show_pre_compression_snapshot'] = True
+        out.append(session)
+    return out
+
+
+def _strip_sidebar_internal_flags(sessions: list[dict]) -> None:
+    for session in sessions:
+        session.pop('_show_pre_compression_snapshot', None)
 
 
 def _active_state_db_path() -> Path:
@@ -989,19 +1515,37 @@ def _active_state_db_path() -> Path:
     return hermes_home / 'state.db'
 
 
+def _sidebar_title_is_generic_webui(title: str | None) -> bool:
+    text = ' '.join(str(title or '').split())
+    if text == 'Hermes WebUI':
+        return True
+    prefix = 'Hermes WebUI #'
+    return text.startswith(prefix) and text[len(prefix):].isdigit()
+
+
 def _enrich_sidebar_lineage_metadata(sessions: list[dict]) -> None:
     """Attach state.db compression lineage metadata used by sidebar collapse."""
     try:
         metadata = read_session_lineage_metadata(
             _active_state_db_path(),
-            {s.get('session_id') for s in sessions},
+            {str(s.get('session_id')) for s in sessions if s.get('session_id')},
         )
     except Exception:
         return
     for session in sessions:
         sid = session.get('session_id')
         if sid in metadata:
-            session.update(metadata[sid])
+            entry = dict(metadata[sid])
+            state_db_title = entry.pop('_state_db_title', None)
+            session.update(entry)
+            title = session.get('title')
+            if (
+                state_db_title
+                and state_db_title != title
+                and _sidebar_title_is_generic_webui(title)
+            ):
+                session['_state_db_title'] = state_db_title
+                session['display_title'] = state_db_title
 
 
 def _diag_stage(diag, name: str) -> None:
@@ -1077,7 +1621,9 @@ def all_sessions(diag=None):
                 and not s.get('has_pending_user_message')
                 and not s.get('worktree_path')
             )]
+            result = _prefer_fuller_snapshots_for_sidebar(result)
             result = [s for s in result if not _hide_from_default_sidebar(s)]
+            _strip_sidebar_internal_flags(result)
             # Backfill: sessions created before Sprint 22 have no profile tag.
             # Attribute them to 'default' so the client profile filter works correctly.
             for s in result:
@@ -1113,7 +1659,9 @@ def all_sessions(diag=None):
         and not s.pending_user_message
         and not getattr(s, 'worktree_path', None)
     )]
+    result = _prefer_fuller_snapshots_for_sidebar(result)
     result = [s for s in result if not _hide_from_default_sidebar(s)]
+    _strip_sidebar_internal_flags(result)
     for s in result:
         if not s.get('profile'):
             s['profile'] = 'default'
@@ -1778,29 +2326,21 @@ def _json_loads_if_string(value):
         return value
 
 
-def get_cli_session_messages(sid) -> list:
-    """Read messages for a single CLI/external-agent session.
+def get_state_db_session_messages(sid, *, stitch_continuations: bool = False) -> list:
+    """Read messages for a Hermes session from the active profile's state.db.
 
-    Preserve tool-call/result and reasoning metadata from the agent state.db so
-    CLI-origin transcripts render with the same tool cards as WebUI-native
-    sessions. When the requested session is the tip of a compression/CLI-close
-    continuation chain, return the stitched full transcript across all segments
-    in chronological order. Returns empty list on any error.
+    This generic reader intentionally works for any session source, including
+    WebUI-origin sessions that were later updated through another Hermes surface
+    such as the Gateway API Server.  When ``stitch_continuations`` is true it
+    preserves the historical CLI/external-agent behavior of walking compatible
+    compression/close parent segments before reading messages.
     """
-    import os
-    if str(sid or '').startswith(f'{CLAUDE_CODE_SOURCE}_'):
-        return get_claude_code_session_messages(sid)
     try:
         import sqlite3
     except ImportError:
         return []
 
-    try:
-        from api.profiles import get_active_hermes_home
-        hermes_home = Path(get_active_hermes_home()).expanduser().resolve()
-    except Exception:
-        hermes_home = Path(os.getenv('HERMES_HOME', str(HOME / '.hermes'))).expanduser().resolve()
-    db_path = hermes_home / 'state.db'
+    db_path = _active_state_db_path()
     if not db_path.exists():
         return []
 
@@ -1825,47 +2365,48 @@ def get_cli_session_messages(sid) -> list:
             ]
             selected = ['role', 'content', 'timestamp'] + [c for c in optional if c in available]
 
-            cur.execute("PRAGMA table_info(sessions)")
-            session_cols = {str(row['name']) for row in cur.fetchall()}
             session_chain = [str(sid)]
-            if {'parent_session_id', 'end_reason', 'started_at', 'source'}.issubset(session_cols):
-                cur.execute(
-                    """
-                    SELECT id, source, started_at, parent_session_id, ended_at, end_reason
-                    FROM sessions
-                    WHERE id = ?
-                    """,
-                    (sid,),
-                )
-                rows_by_id = {}
-                row = cur.fetchone()
-                if row:
-                    rows_by_id[str(row['id'])] = dict(row)
-                    current_id = str(row['id'])
-                    seen = {current_id}
-                    for _ in range(20):
-                        current = rows_by_id.get(current_id)
-                        parent_id = current.get('parent_session_id') if current else None
-                        if not parent_id or parent_id in seen:
-                            break
-                        cur.execute(
-                            """
-                            SELECT id, source, started_at, parent_session_id, ended_at, end_reason
-                            FROM sessions
-                            WHERE id = ?
-                            """,
-                            (parent_id,),
-                        )
-                        parent_row = cur.fetchone()
-                        if not parent_row:
-                            break
-                        parent_dict = dict(parent_row)
-                        rows_by_id[str(parent_row['id'])] = parent_dict
-                        if not _is_continuation_session(parent_dict, current):
-                            break
-                        session_chain.insert(0, str(parent_row['id']))
-                        current_id = str(parent_row['id'])
-                        seen.add(current_id)
+            if stitch_continuations:
+                cur.execute("PRAGMA table_info(sessions)")
+                session_cols = {str(row['name']) for row in cur.fetchall()}
+                if {'parent_session_id', 'end_reason', 'started_at', 'source'}.issubset(session_cols):
+                    cur.execute(
+                        """
+                        SELECT id, source, started_at, parent_session_id, ended_at, end_reason
+                        FROM sessions
+                        WHERE id = ?
+                        """,
+                        (sid,),
+                    )
+                    rows_by_id = {}
+                    row = cur.fetchone()
+                    if row:
+                        rows_by_id[str(row['id'])] = dict(row)
+                        current_id = str(row['id'])
+                        seen = {current_id}
+                        for _ in range(20):
+                            current = rows_by_id.get(current_id)
+                            parent_id = current.get('parent_session_id') if current else None
+                            if not parent_id or parent_id in seen:
+                                break
+                            cur.execute(
+                                """
+                                SELECT id, source, started_at, parent_session_id, ended_at, end_reason
+                                FROM sessions
+                                WHERE id = ?
+                                """,
+                                (parent_id,),
+                            )
+                            parent_row = cur.fetchone()
+                            if not parent_row:
+                                break
+                            parent_dict = dict(parent_row)
+                            rows_by_id[str(parent_row['id'])] = parent_dict
+                            if not _is_continuation_session(parent_dict, current):
+                                break
+                            session_chain.insert(0, str(parent_row['id']))
+                            current_id = str(parent_row['id'])
+                            seen.add(current_id)
 
             placeholders = ', '.join('?' for _ in session_chain)
             cur.execute(f"""
@@ -1896,6 +2437,174 @@ def get_cli_session_messages(sid) -> list:
     except Exception:
         return []
     return msgs
+
+
+def get_state_db_session_summary(sid) -> dict:
+    """Return cheap message count/max timestamp for one state.db session.
+
+    This is intentionally narrower than ``get_state_db_session_messages`` for
+    metadata-only WebUI polling: callers only need a staleness signal, not a
+    fully materialized transcript with tool/reasoning metadata.
+    """
+    import os
+    try:
+        import sqlite3
+    except ImportError:
+        return {}
+
+    db_path = _active_state_db_path()
+    if not sid or not db_path.exists():
+        return {}
+
+    try:
+        with closing(sqlite3.connect(str(db_path))) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute("PRAGMA table_info(messages)")
+            available = {str(row['name']) for row in cur.fetchall()}
+            if not {'session_id', 'timestamp'}.issubset(available):
+                return {}
+            cur.execute(
+                """
+                SELECT COUNT(*) AS message_count, MAX(timestamp) AS last_message_at
+                FROM messages
+                WHERE session_id = ?
+                """,
+                (str(sid),),
+            )
+            row = cur.fetchone()
+            if not row:
+                return {}
+            count = int(row['message_count'] or 0)
+            last_message_at = row['last_message_at']
+            result = {'message_count': count}
+            if last_message_at not in (None, ''):
+                try:
+                    result['last_message_at'] = float(last_message_at)
+                except (TypeError, ValueError):
+                    pass
+            return result
+    except Exception:
+        return {}
+
+
+def _normalized_message_timestamp_for_key(value):
+    if value is None or value == "":
+        return ""
+    try:
+        timestamp = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if timestamp.is_integer():
+        return str(int(timestamp))
+    return ("%.6f" % timestamp).rstrip("0").rstrip(".")
+
+
+def _message_timestamp_as_float(msg):
+    if not isinstance(msg, dict):
+        return None
+    value = msg.get("timestamp")
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _session_message_merge_key(msg: dict):
+    if not isinstance(msg, dict):
+        return ("non_dict", repr(msg))
+    message_identity = msg.get("id") or msg.get("message_id")
+    if message_identity:
+        return ("message_id", str(message_identity))
+    return (
+        "legacy",
+        str(msg.get("role") or ""),
+        str(msg.get("content") or ""),
+        _normalized_message_timestamp_for_key(msg.get("timestamp")),
+        str(msg.get("tool_call_id") or ""),
+        str(msg.get("tool_name") or msg.get("name") or ""),
+    )
+
+
+def merge_session_messages_append_only(sidecar_messages: list, state_messages: list) -> list:
+    """Merge sidecar/context and state.db messages without deleting local rows."""
+    sidecar_messages = list(sidecar_messages or [])
+    state_messages = list(state_messages or [])
+    if not state_messages:
+        return sidecar_messages
+    if not sidecar_messages:
+        return state_messages
+
+    merged_messages = []
+    seen_message_keys = set()
+    max_sidecar_timestamp = None
+    for msg in sidecar_messages:
+        timestamp = _message_timestamp_as_float(msg)
+        if timestamp is not None:
+            max_sidecar_timestamp = timestamp if max_sidecar_timestamp is None else max(max_sidecar_timestamp, timestamp)
+        key = _session_message_merge_key(msg)
+        seen_message_keys.add(key)
+        merged_messages.append(msg)
+    for msg in state_messages:
+        timestamp = _message_timestamp_as_float(msg)
+        key = _session_message_merge_key(msg)
+        if max_sidecar_timestamp is not None and timestamp is not None and timestamp <= max_sidecar_timestamp:
+            if key in seen_message_keys:
+                continue
+            if not (isinstance(key, tuple) and key[:1] == ("message_id",)):
+                continue
+        if key in seen_message_keys:
+            continue
+        # State rows at or before the newest sidecar timestamp are normally
+        # assumed to have already been observed by the sidecar. The <= gate
+        # preserves sidecar-only ordering/metadata for equal timestamps and
+        # prevents duplicate legacy rows when timestamp precision differs
+        # between stores. Explicit message ids are authoritative, though: two
+        # equal-timestamp messages with different ids are distinct retries.
+        if (
+            key[0] != "message_id"
+            and max_sidecar_timestamp is not None
+            and timestamp is not None
+            and timestamp <= max_sidecar_timestamp
+        ):
+            continue
+        seen_message_keys.add(key)
+        merged_messages.append(msg)
+    return merged_messages
+
+
+def reconciled_state_db_messages_for_session(
+    session, *, prefer_context: bool = False, state_messages: list | None = None
+) -> list:
+    """Return append-only messages reconciled with state.db for a WebUI session."""
+    if session is None:
+        return []
+    local_messages = []
+    if prefer_context:
+        context_messages = getattr(session, 'context_messages', None)
+        if isinstance(context_messages, list) and context_messages:
+            local_messages = context_messages
+    if not local_messages:
+        local_messages = getattr(session, 'messages', None) or []
+    if state_messages is None:
+        state_messages = get_state_db_session_messages(getattr(session, 'session_id', None))
+    return merge_session_messages_append_only(local_messages, state_messages)
+
+
+def get_cli_session_messages(sid) -> list:
+    """Read messages for a single CLI/external-agent session.
+
+    Preserve tool-call/result and reasoning metadata from the agent state.db so
+    CLI-origin transcripts render with the same tool cards as WebUI-native
+    sessions. When the requested session is the tip of a compression/CLI-close
+    continuation chain, return the stitched full transcript across all segments
+    in chronological order. Returns empty list on any error.
+    """
+    if str(sid or '').startswith(f'{CLAUDE_CODE_SOURCE}_'):
+        return get_claude_code_session_messages(sid)
+    return get_state_db_session_messages(sid, stitch_continuations=True)
 
 
 def count_conversation_rounds(sid: str, since: float | None = None) -> int:
