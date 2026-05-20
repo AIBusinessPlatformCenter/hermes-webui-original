@@ -1408,3 +1408,30 @@ def test_stale_ui_js_does_not_inject_unavailable_option():
     assert "const first=sel.querySelector('optgroup > option, option');" in src, (
         "the first available option should remain only as a fallback when no configured default applies"
     )
+
+
+# -- Domestic provider tests (added for China-focused deployment) --
+
+class TestDomesticProviderConfig:
+    """Verify that the deployment is configured for domestic (China) providers."""
+
+    def test_fallback_models_are_domestic(self):
+        """_FALLBACK_MODELS should only contain domestic providers."""
+        src = _read("api/config.py")
+        assert '"openai/gpt-' not in src, "OpenAI models should not be in fallback list"
+        assert '"anthropic/claude-' not in src, "Anthropic models should not be in fallback list"
+        assert '"google/gemini-' not in src, "Google models should not be in fallback list"
+        assert "kimi" in src.lower()
+        assert "glm" in src.lower() or "zai" in src.lower()
+        assert "qwen" in src.lower()
+        assert "minimax" in src.lower()
+
+    def test_onboarding_providers_are_domestic(self):
+        """_SUPPORTED_PROVIDER_SETUPS should prioritize domestic providers."""
+        src = _read("api/onboarding.py")
+        assert '"kimi-coding"' in src
+        assert '"zai"' in src
+        assert '"alibaba"' in src
+        assert '"minimax"' in src
+        assert '"xiaomi"' in src
+        assert '"domestic"' in src

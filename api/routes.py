@@ -22,7 +22,7 @@ import uuid
 import re
 from pathlib import Path
 from contextlib import closing
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlparse
 from api.agent_sessions import (
     MESSAGING_SOURCES,
     is_cli_session_row,
@@ -89,6 +89,90 @@ _CSP_REPORT_MAX_BODY_BYTES = 64 * 1024
 # Re-exported here so existing `_profiles_match(...)` call sites in this
 # module keep resolving without per-call-site refactors.
 from api.profiles import _profiles_match  # noqa: F401, E402  (re-export)
+
+
+# -- SkillHub helpers --
+
+def _skillhub_base_url() -> str:
+    value = (os.getenv("SKILLHUB_URL") or "").strip().rstrip("/")
+    if not value:
+        return ""
+    parsed = urlparse(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return ""
+    return value
+
+def _require_skillhub_url():
+    url = _skillhub_base_url()
+    if not url:
+        raise ValueError("SKILLHUB_URL not configured")
+    return url
+
+def _skillhub_request(path: str, method="GET", body=None, params=None, timeout=15):
+    import urllib.request
+    import urllib.error
+    import urllib.parse
+    base = _require_skillhub_url()
+    url = base + path
+    if params:
+        url = url + "?" + urllib.parse.urlencode(params)
+    data = None
+    if body is not None:
+        data = json.dumps(body).encode("utf-8")
+    req = urllib.request.Request(url, data=data, method=method)
+    if data:
+        req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        try:
+            detail = json.loads(e.read().decode("utf-8"))
+        except Exception:
+            detail = {"error": str(e)}
+        raise RuntimeError(detail.get("error") or detail.get("message") or str(e))
+
+def _skillhub_request_json(path: str, params=None):
+    return _skillhub_request(path, params=params)
+
+def _skillhub_local_skill_names():
+    data = _skills_list_from_dir(_active_skills_dir())
+    return {s.get("name", "").strip().lower() for s in data.get("skills", []) if s.get("name")}
+
+def _skillhub_lock_entries():
+    from pathlib import Path
+    lock_path = _active_skills_dir() / ".hub" / "lock.json"
+    if not lock_path.exists():
+        return []
+    try:
+        data = json.loads(lock_path.read_text(encoding="utf-8"))
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+def _skillhub_find_lock_entry(skill, lock_entries):
+    remote_name = str(skill.get("name") or "").strip()
+    for entry in lock_entries:
+        if str(entry.get("remote_name") or "").strip() == remote_name:
+            return entry
+    return None
+
+def _skillhub_choose_install_name(skill):
+    display = str(skill.get("display_name") or skill.get("name") or "").strip()
+    return display.lower().replace(" ", "-").replace("_", "-")
+
+def _skillhub_remote_tokens(skill):
+    name = str(skill.get("name") or "").strip().lower()
+    display = str(skill.get("display_name") or "").strip().lower()
+    return {name, display, name.replace(" ", "-"), display.replace(" ", "-")}
+
+def _skillhub_fetch_bundle(remote_name, display_name):
+    base = _require_skillhub_url()
+    data = _skillhub_request_json(f"/api/skills/{urllib.parse.quote(remote_name)}")
+    files = data.get("files", {})
+    content = data.get("content", "")
+    install_name = display_name or remote_name
+    return install_name, files, content
 
 
 def _all_profiles_query_flag(parsed_url) -> bool:
@@ -4451,12 +4535,82 @@ def handle_get(handler, parsed) -> bool:
         with cron_profile_context():
             return _handle_cron_status(handler, parsed)
 
+    # -- SkillHub API (GET) --
+    if parsed.path == "/api/skillhub/skills":
+        hub_url = _skillhub_base_url()
+        if not hub_url:
+            return j(handler, {"enabled": False, "skills": []})
+        try:
+            data = _skillhub_request_json("/api/skills")
+            local_names = _skillhub_local_skill_names()
+            lock_entries = _skillhub_lock_entries()
+            skills = []
+            for item in data.get("skills", []):
+                skill = dict(item)
+                install_name = _skillhub_choose_install_name(skill)
+                skill["install_name"] = install_name
+                lock_entry = _skillhub_find_lock_entry(skill, lock_entries)
+                remote_tokens = _skillhub_remote_tokens(skill)
+                skill["installed"] = bool(lock_entry) or bool(remote_tokens & local_names)
+                skill["hub_installed"] = bool(lock_entry)
+                skill["installed_name"] = (lock_entry or {}).get("name") or install_name
+                skills.append(skill)
+            return j(handler, {"enabled": True, "skills": skills})
+        except Exception as e:
+            return bad(handler, f"SkillHub error: {e}", 502)
+
+    if parsed.path == "/api/skillhub/categories":
+        hub_url = _skillhub_base_url()
+        if not hub_url:
+            return j(handler, {"enabled": False, "categories": []})
+        try:
+            data = _skillhub_request_json("/api/categories")
+            return j(handler, {"enabled": True, "categories": data.get("categories", [])})
+        except Exception as e:
+            return bad(handler, f"SkillHub error: {e}", 502)
+
+    if parsed.path == "/api/skillhub/content":
+        qs = parse_qs(parsed.query)
+        name = qs.get("name", [""])[0]
+        if not name:
+            return bad(handler, "name required", 400)
+        hub_url = _skillhub_base_url()
+        if not hub_url:
+            return bad(handler, "SkillHub not configured", 503)
+        try:
+            data = _skillhub_request_json(f"/api/skills/{urllib.parse.quote(name)}")
+            return j(handler, data)
+        except Exception as e:
+            return bad(handler, f"SkillHub error: {e}", 502)
+
+    if parsed.path == "/api/skillhub/file":
+        qs = parse_qs(parsed.query)
+        name = qs.get("name", [""])[0]
+        file_path = qs.get("file", [""])[0]
+        if not name or not file_path:
+            return bad(handler, "name and file required", 400)
+        hub_url = _skillhub_base_url()
+        if not hub_url:
+            return bad(handler, "SkillHub not configured", 503)
+        try:
+            data = _skillhub_request_json(f"/api/skills/{urllib.parse.quote(name)}/file", params={"file": file_path})
+            return j(handler, data)
+        except Exception as e:
+            return bad(handler, f"SkillHub error: {e}", 502)
+
     # ── Skills API (GET) ──
     if parsed.path == "/api/skills":
         qs = parse_qs(parsed.query)
         category = qs.get("category", [None])[0]
         data = _skills_list_from_dir(_active_skills_dir(), category=category)
-        return j(handler, {"skills": data.get("skills", [])})
+        lock_entries = _skillhub_lock_entries()
+        lock_names = {str(e.get("name") or "").strip().lower() for e in lock_entries}
+        skills = data.get("skills", [])
+        for skill in skills:
+            name = str(skill.get("name") or "").strip().lower()
+            skill["hub_installed"] = name in lock_names
+            skill["can_delete"] = name in lock_names
+        return j(handler, {"skills": skills})
 
     if parsed.path == "/api/skills/content":
         qs = parse_qs(parsed.query)
@@ -5476,6 +5630,73 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "Plugin command not found", 404)
         except RuntimeError as e:
             return bad(handler, _sanitize_error(e), 500)
+
+    # -- SkillHub API (POST) --
+    if parsed.path == "/api/skillhub/install":
+        hub_url = _skillhub_base_url()
+        if not hub_url:
+            return bad(handler, "SkillHub not configured", 503)
+        try:
+            remote_name = str(body.get("name") or "").strip()
+            display_name = str(body.get("display_name") or "").strip()
+            force = bool(body.get("force"))
+            if not remote_name:
+                return bad(handler, "name required", 400)
+            install_name, files, content = _skillhub_fetch_bundle(remote_name, display_name)
+            # Import agent tools for installation
+            sys.path.insert(0, os.getenv("HERMES_WEBUI_AGENT_DIR", "/opt/hermes"))
+            from tools.skills_guard import format_scan_report, scan_skill, should_allow_install
+            from tools.skills_hub import SkillBundle, install_from_quarantine, quarantine_bundle
+            bundle = SkillBundle(
+                name=install_name,
+                files=files,
+                source="skillhub",
+                identifier=remote_name,
+                trust_level="community",
+                metadata={
+                    "skillhub_remote_name": remote_name,
+                    "skillhub_display_name": display_name,
+                    "skillhub_url": _require_skillhub_url(),
+                },
+            )
+            quarantine_path = quarantine_bundle(bundle)
+            scan_result = scan_skill(quarantine_path, source="skillhub")
+            allowed, reason = should_allow_install(scan_result, force=force)
+            if allowed is not True:
+                shutil.rmtree(quarantine_path, ignore_errors=True)
+                return bad(handler, f"Skill install blocked ({reason}):\n{format_scan_report(scan_result)}", 400)
+            install_dir = install_from_quarantine(quarantine_path, install_name, "", bundle, scan_result)
+            return j(handler, {"ok": True, "name": install_name, "dir": str(install_dir)})
+        except Exception as e:
+            return bad(handler, f"SkillHub install error: {e}", 500)
+
+    if parsed.path == "/api/skillhub/uninstall":
+        hub_url = _skillhub_base_url()
+        if not hub_url:
+            return bad(handler, "SkillHub not configured", 503)
+        try:
+            install_name = str(body.get("install_name") or body.get("name") or "").strip()
+            if not install_name:
+                return bad(handler, "install_name required", 400)
+            skills_dir = _active_skills_dir()
+            skill_dir, _skill_md = _find_skill_in_dirs(install_name, _active_skill_search_dirs(skills_dir))
+            if not skill_dir:
+                return bad(handler, "Skill not found", 404)
+            # Remove from lock file if present
+            from pathlib import Path
+            lock_path = skills_dir / ".hub" / "lock.json"
+            if lock_path.exists():
+                try:
+                    entries = json.loads(lock_path.read_text(encoding="utf-8"))
+                    if isinstance(entries, list):
+                        entries = [e for e in entries if str(e.get("name") or "").strip() != install_name]
+                        lock_path.write_text(json.dumps(entries, indent=2), encoding="utf-8")
+                except Exception:
+                    pass
+            shutil.rmtree(skill_dir, ignore_errors=True)
+            return j(handler, {"ok": True})
+        except Exception as e:
+            return bad(handler, f"SkillHub uninstall error: {e}", 500)
 
     # ── Skills (POST) ──
     if parsed.path == "/api/skills/save":
@@ -6928,7 +7149,7 @@ def _handle_folder_download(handler, parsed):
     body BEFORE any zip bytes are sent.
     """
     import zipfile
-    from urllib.parse import parse_qs
+    from urllib.parse import parse_qs, urlparse
 
     qs = parse_qs(parsed.query)
     sid = qs.get("session_id", [""])[0]

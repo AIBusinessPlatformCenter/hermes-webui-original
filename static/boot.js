@@ -1420,7 +1420,7 @@ function applyBotName(){
     window._sidebarDensity=(s.sidebar_density==='detailed'?'detailed':'compact');
     window._busyInputMode=(s.busy_input_mode||'queue');
     window._sessionEndlessScrollEnabled=!!s.session_endless_scroll;
-    window._botName=s.bot_name||'Hermes';
+    window._botName=s.bot_name||'超级智能体';
     if(s.default_model) window._defaultModel=s.default_model;
     window._sessionJumpButtonsEnabled=!!s.session_jump_buttons;
     // Reconcile appearance: prefer localStorage (what the user last saw) over
@@ -1483,7 +1483,7 @@ function applyBotName(){
     window._sidebarDensity='compact';
     window._busyInputMode='queue';
     window._sessionEndlessScrollEnabled=false;
-    window._botName='Hermes';
+    window._botName='超级智能体';
     _bootSettings={check_for_updates:false};
     if(typeof setLocale==='function'){
       const _lang=typeof resolvePreferredLocale==='function'

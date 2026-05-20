@@ -84,22 +84,22 @@
   :root[data-font-size="xlarge"] { font-size: 18px; }
   /* ── Dark mode — navy-black + gold accent matching Hermes terminal ── */
   :root.dark {
-    --bg:#0D0D1A;--sidebar:#141425;--border:#2A2A45;--border2:rgba(255,255,255,0.14);
-    --text:#FFF8DC;--muted:#C0C0C0;--accent:#FFD700;--blue:#4DD0E1;--gold:#FFBF00;--code-bg:#1A1A2E;
-    --surface:#1A1A2E;--topbar-bg:rgba(20,20,37,.98);--main-bg:rgba(13,13,26,0.5);
-    --focus-ring:rgba(255,215,0,.35);--focus-glow:rgba(255,215,0,.08);
+    --bg:#09090B;--sidebar:#111113;--border:#27272A;--border2:rgba(255,255,255,0.12);
+    --text:#FAFAFA;--muted:#A1A1AA;--accent:#D4D4D8;--blue:#D4D4D8;--gold:#E4E4E7;--code-bg:#18181B;
+    --surface:#18181B;--topbar-bg:rgba(9,9,11,.98);--main-bg:rgba(9,9,11,.86);
+    --focus-ring:rgba(212,212,216,.25);--focus-glow:rgba(212,212,216,.06);
     --input-bg:rgba(255,255,255,.04);--hover-bg:rgba(255,255,255,.06);
-    --strong:#fff;--em:#C0C0C0;--code-text:#f0c27f;--code-inline-bg:rgba(0,0,0,.35);--pre-text:#e2e8f0;
-    --accent-hover:#FFBF00;--accent-bg:rgba(255,215,0,0.08);--accent-bg-strong:rgba(255,215,0,0.15);--accent-text:#FFD700;
-    --error:#EF5350;--success:#4CAF50;--warning:#FFA726;--info:#4DD0E1;
+    --strong:#fff;--em:#D4D4D8;--code-text:#D4D4D8;--code-inline-bg:rgba(0,0,0,.35);--pre-text:#E4E4E7;
+    --accent-hover:#E4E4E7;--accent-bg:rgba(212,212,216,0.08);--accent-bg-strong:rgba(212,212,216,0.15);--accent-text:#D4D4D8;
+    --error:#A1A1AA;--success:#D4D4D8;--warning:#B4B4B8;--info:#D4D4D8;
     --surface-subtle:rgba(255,255,255,.025);--surface-subtle-hover:rgba(255,255,255,.045);
     --border-subtle:rgba(255,255,255,.075);--border-muted:rgba(255,255,255,.12);
   }
   /* ── Skin: Default (gold — matches base) ── */
   /* No overrides needed — :root and .dark already use gold accent */
   /* ── Skin: Ares (red) ── */
-  :root[data-skin="ares"]{--accent:#C0392B;--accent-hover:#A93226;--accent-bg:rgba(192,57,43,0.08);--accent-bg-strong:rgba(192,57,43,0.15);--accent-text:#922B21;}
-  :root.dark[data-skin="ares"]{--accent:#FF4444;--accent-hover:#CC3333;--accent-bg:rgba(255,68,68,0.08);--accent-bg-strong:rgba(255,68,68,0.15);--accent-text:#FF4444;}
+  :root[data-skin="ares"]{--accent:#52525B;--accent-hover:#27272A;--accent-bg:rgba(82,82,91,0.08);--accent-bg-strong:rgba(82,82,91,0.15);--accent-text:#52525B;}
+  :root.dark[data-skin="ares"]{--accent:#D4D4D8;--accent-hover:#A1A1AA;--accent-bg:rgba(212,212,216,0.08);--accent-bg-strong:rgba(212,212,216,0.15);--accent-text:#D4D4D8;}
   /* ── Skin: Mono (gray) ── */
   :root[data-skin="mono"]{--accent:#666666;--accent-hover:#555555;--accent-bg:rgba(102,102,102,0.08);--accent-bg-strong:rgba(102,102,102,0.15);--accent-text:#555555;}
   :root.dark[data-skin="mono"]{--accent:#CCCCCC;--accent-hover:#999999;--accent-bg:rgba(204,204,204,0.08);--accent-bg-strong:rgba(204,204,204,0.15);--accent-text:#CCCCCC;}
@@ -107,14 +107,14 @@
   :root[data-skin="slate"]{--accent:#475569;--accent-hover:#334155;--accent-bg:rgba(71,85,105,0.08);--accent-bg-strong:rgba(71,85,105,0.15);--accent-text:#334155;}
   :root.dark[data-skin="slate"]{--accent:#94A3B8;--accent-hover:#64748B;--accent-bg:rgba(148,163,184,0.08);--accent-bg-strong:rgba(148,163,184,0.15);--accent-text:#94A3B8;}
   /* ── Skin: Poseidon (ocean blue) ── */
-  :root[data-skin="poseidon"]{--accent:#0369A1;--accent-hover:#025080;--accent-bg:rgba(3,105,161,0.08);--accent-bg-strong:rgba(3,105,161,0.15);--accent-text:#025080;}
-  :root.dark[data-skin="poseidon"]{--accent:#0EA5E9;--accent-hover:#0284C7;--accent-bg:rgba(14,165,233,0.08);--accent-bg-strong:rgba(14,165,233,0.15);--accent-text:#0EA5E9;}
+  :root[data-skin="poseidon"]{--accent:#52525B;--accent-hover:#27272A;--accent-bg:rgba(82,82,91,0.08);--accent-bg-strong:rgba(82,82,91,0.15);--accent-text:#52525B;}
+  :root.dark[data-skin="poseidon"]{--accent:#D4D4D8;--accent-hover:#A1A1AA;--accent-bg:rgba(212,212,216,0.08);--accent-bg-strong:rgba(212,212,216,0.15);--accent-text:#D4D4D8;}
   /* ── Skin: Sisyphus (purple) ── */
-  :root[data-skin="sisyphus"]{--accent:#7C3AED;--accent-hover:#6D28D9;--accent-bg:rgba(124,58,237,0.08);--accent-bg-strong:rgba(124,58,237,0.15);--accent-text:#6D28D9;}
-  :root.dark[data-skin="sisyphus"]{--accent:#A78BFA;--accent-hover:#8B5CF6;--accent-bg:rgba(167,139,250,0.08);--accent-bg-strong:rgba(167,139,250,0.15);--accent-text:#A78BFA;}
+  :root[data-skin="sisyphus"]{--accent:#52525B;--accent-hover:#27272A;--accent-bg:rgba(82,82,91,0.08);--accent-bg-strong:rgba(82,82,91,0.15);--accent-text:#52525B;}
+  :root.dark[data-skin="sisyphus"]{--accent:#D4D4D8;--accent-hover:#A1A1AA;--accent-bg:rgba(212,212,216,0.08);--accent-bg-strong:rgba(212,212,216,0.15);--accent-text:#D4D4D8;}
   /* ── Skin: Charizard (orange) ── */
-  :root[data-skin="charizard"]{--accent:#EA580C;--accent-hover:#C2410C;--accent-bg:rgba(234,88,12,0.08);--accent-bg-strong:rgba(234,88,12,0.15);--accent-text:#C2410C;}
-  :root.dark[data-skin="charizard"]{--accent:#FB923C;--accent-hover:#F97316;--accent-bg:rgba(251,146,60,0.08);--accent-bg-strong:rgba(251,146,60,0.15);--accent-text:#FB923C;}
+  :root[data-skin="charizard"]{--accent:#52525B;--accent-hover:#27272A;--accent-bg:rgba(82,82,91,0.08);--accent-bg-strong:rgba(82,82,91,0.15);--accent-text:#52525B;}
+  :root.dark[data-skin="charizard"]{--accent:#D4D4D8;--accent-hover:#A1A1AA;--accent-bg:rgba(212,212,216,0.08);--accent-bg-strong:rgba(212,212,216,0.15);--accent-text:#D4D4D8;}
   /* ── Skin: Sienna (warm clay & sand earth palette) ──
      Full palette rewrite (not just --accent): warm off-white surface,
      soft sand sidebar, clay accent. Sets --user-bubble-* for the redesigned
@@ -4360,3 +4360,36 @@ main.main.showing-logs > #mainLogs{display:flex;}
   text-align:left;
   unicode-bidi:isolate;
 }
+
+/* -- SkillHub panel styles -- */
+.skillhub-item { display:flex; justify-content:space-between; gap:10px; padding:10px 12px; border-bottom:1px solid var(--border); }
+.skillhub-item:last-child { border-bottom:none; }
+.skillhub-main { min-width:0; display:flex; flex-direction:column; gap:4px; flex:1; }
+.skillhub-meta { display:flex; flex-wrap:wrap; gap:6px; font-size:10px; color:var(--muted); }
+.skillhub-actions { display:flex; gap:6px; flex-shrink:0; align-items:center; }
+.skillhub-btn { background:#FFFFFF; border:1px solid var(--border); border-radius:7px; color:var(--text); padding:5px 8px; font-size:11px; cursor:pointer; }
+.skillhub-btn.primary { background:#000000; color:#FFFFFF; border-color:#000000; }
+:root.dark .skillhub-btn { background:#18181B; border-color:#27272A; }
+:root.dark .skillhub-btn.primary { background:#FAFAFA; color:#09090B; border-color:#FAFAFA; }
+.skillhub-state { display:inline-flex; align-items:center; padding:1px 6px; border-radius:999px; background:rgba(0,0,0,.06); color:var(--muted); font-size:10px; }
+.skillhub-state.installed { background:rgba(0,0,0,.1); color:var(--text); }
+:root.dark .skillhub-state { background:rgba(255,255,255,.06); }
+:root.dark .skillhub-state.installed { background:rgba(255,255,255,.1); color:var(--text); }
+#skillhubSearch { width:100%; padding:6px 10px; border:1px solid var(--border); border-radius:8px; font-size:12px; background:var(--input-bg); color:var(--text); }
+#skillhubSearch:focus { outline:none; border-color:var(--accent); }
+
+/* -- Task panel (browser history) styles -- */
+.browser-history-item { padding:10px 12px; border-bottom:1px solid var(--border); font-size:12px; }
+.browser-history-header { display:flex; align-items:center; gap:8px; margin-bottom:4px; }
+.browser-history-icon { font-size:14px; }
+.browser-history-action { font-weight:600; }
+.browser-history-status { font-size:10px; padding:1px 6px; border-radius:999px; background:rgba(0,0,0,.06); }
+.browser-history-status.running { background:rgba(0,0,0,.1); color:var(--accent-text); }
+.browser-history-status.error { background:rgba(198,40,40,.12); color:var(--error); }
+.browser-history-time { font-size:10px; color:var(--muted); margin-left:auto; }
+.browser-history-preview { color:var(--muted); font-size:11px; margin-bottom:4px; line-height:1.4; }
+.browser-history-args { font-size:10px; margin-bottom:4px; }
+.browser-history-arg-key { color:var(--accent-text); font-weight:500; margin-right:4px; }
+.browser-history-arg-val { color:var(--muted); }
+.browser-history-output { background:var(--code-bg); border:1px solid var(--border2); border-radius:6px; padding:8px; font-size:11px; line-height:1.5; overflow-x:auto; max-height:200px; overflow-y:auto; }
+.browser-history-text { color:var(--muted); font-size:11px; font-style:italic; }

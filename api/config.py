@@ -638,51 +638,22 @@ CLI_TOOLSETS = _resolve_cli_toolsets()
 # Hardcoded fallback models (used when no config.yaml or agent is available)
 # Also used as the OpenRouter model list — keep this curated to current, widely-used models.
 _FALLBACK_MODELS = [
-    # OpenAI
-    {"provider": "OpenAI",    "id": "openai/gpt-5.4-mini",                "label": "GPT-5.4 Mini"},
-    {"provider": "OpenAI",    "id": "openai/gpt-5.4",                     "label": "GPT-5.4"},
-    # Anthropic — 4.6 flagship + 4.5 generation
-    {"provider": "Anthropic", "id": "anthropic/claude-opus-4.7",          "label": "Claude Opus 4.7"},
-    {"provider": "Anthropic", "id": "anthropic/claude-opus-4.6",          "label": "Claude Opus 4.6"},
-    {"provider": "Anthropic", "id": "anthropic/claude-sonnet-4.6",        "label": "Claude Sonnet 4.6"},
-    {"provider": "Anthropic", "id": "anthropic/claude-sonnet-4-5",        "label": "Claude Sonnet 4.5"},
-    {"provider": "Anthropic", "id": "anthropic/claude-haiku-4-5",         "label": "Claude Haiku 4.5"},
-    # Google — 3.x (latest preview) + 2.5 (stable GA)
-    {"provider": "Google",    "id": "google/gemini-3.1-pro-preview",            "label": "Gemini 3.1 Pro Preview"},
-    {"provider": "Google",    "id": "google/gemini-3-flash-preview",            "label": "Gemini 3 Flash Preview"},
-    {"provider": "Google",    "id": "google/gemini-3.1-flash-lite-preview",     "label": "Gemini 3.1 Flash Lite Preview"},
-    {"provider": "Google",    "id": "google/gemini-2.5-pro",                    "label": "Gemini 2.5 Pro"},
-    {"provider": "Google",    "id": "google/gemini-2.5-flash",                  "label": "Gemini 2.5 Flash"},
-    # DeepSeek
-    {"provider": "DeepSeek",  "id": "deepseek/deepseek-v4-flash",          "label": "DeepSeek V4 Flash"},
-    {"provider": "DeepSeek",  "id": "deepseek/deepseek-v4-pro",            "label": "DeepSeek V4 Pro"},
-    {"provider": "DeepSeek",  "id": "deepseek/deepseek-chat-v3-0324",      "label": "DeepSeek V3 (legacy)"},
-    {"provider": "DeepSeek",  "id": "deepseek/deepseek-r1",                "label": "DeepSeek R1 (legacy)"},
-    # Qwen (Alibaba) — strong coding and general models
-    {"provider": "Qwen",      "id": "qwen/qwen3-coder",                   "label": "Qwen3 Coder"},
-    {"provider": "Qwen",      "id": "qwen/qwen3.6-plus",                  "label": "Qwen3.6 Plus"},
-    # xAI
-    {"provider": "xAI",       "id": "x-ai/grok-4.20",                    "label": "Grok 4.20"},
-    # Mistral
-    {"provider": "Mistral",   "id": "mistralai/mistral-large-latest",     "label": "Mistral Large"},
-    # MiniMax
-    {"provider": "MiniMax",   "id": "minimax/MiniMax-M2.7",             "label": "MiniMax M2.7"},
-    {"provider": "MiniMax",   "id": "minimax/MiniMax-M2.7-highspeed",   "label": "MiniMax M2.7 Highspeed"},
+    # Domestic providers (China-focused)
+    # Kimi / Moonshot
+    {"provider": "Kimi / Moonshot", "id": "moonshot/kimi-k2.5",          "label": "Kimi K2.5"},
+    {"provider": "Kimi / Moonshot", "id": "moonshot/kimi-k2-thinking",   "label": "Kimi K2 Thinking"},
     # Z.AI / GLM
-    {"provider": "Z.AI",      "id": "zai/glm-5.1",                      "label": "GLM-5.1"},
-    {"provider": "Z.AI",      "id": "zai/glm-5",                        "label": "GLM-5"},
-    {"provider": "Z.AI",      "id": "zai/glm-5-turbo",                  "label": "GLM-5 Turbo"},
-    {"provider": "Z.AI",      "id": "zai/glm-4.7",                      "label": "GLM-4.7"},
-    {"provider": "Z.AI",      "id": "zai/glm-4.5",                      "label": "GLM-4.5"},
-    {"provider": "Z.AI",      "id": "zai/glm-4.5-flash",                "label": "GLM-4.5 Flash"},
-    # OpenRouter free-tier models — must appear in fallback list so they
-    # are visible even when the tool-support filter in hermes_cli strips
-    # them out of the live catalog (see #1426).
-    {"provider": "OpenRouter", "id": "openrouter/elephant-alpha",                   "label": "Elephant Alpha (free)"},
-    {"provider": "OpenRouter", "id": "openrouter/owl-alpha",                        "label": "Owl Alpha (free)"},
-    {"provider": "OpenRouter", "id": "tencent/hy3-preview:free",                    "label": "Hy3 Preview (free)"},
-    {"provider": "OpenRouter", "id": "nvidia/nemotron-3-super-120b-a12b:free",      "label": "Nemotron 3 Super (free)"},
-    {"provider": "OpenRouter", "id": "arcee-ai/trinity-large-preview:free",         "label": "Trinity Large Preview (free)"},
+    {"provider": "Z.AI / GLM",      "id": "zai/glm-5.1",                 "label": "GLM-5.1"},
+    {"provider": "Z.AI / GLM",      "id": "zai/glm-4.5",                 "label": "GLM-4.5"},
+    # Qwen / Alibaba
+    {"provider": "Qwen / Alibaba",  "id": "qwen/qwen3-coder-plus",       "label": "Qwen3 Coder Plus"},
+    {"provider": "Qwen / Alibaba",  "id": "qwen/qwen3.5-plus",           "label": "Qwen3.5 Plus"},
+    # MiniMax
+    {"provider": "MiniMax",         "id": "minimax/MiniMax-M2.7",        "label": "MiniMax M2.7"},
+    {"provider": "MiniMax",         "id": "minimax/MiniMax-M2.5",        "label": "MiniMax M2.5"},
+    # Xiaomi MiMo
+    {"provider": "Xiaomi MiMo",     "id": "xiaomi/mimo-v2-pro",          "label": "MiMo V2 Pro"},
+    {"provider": "Xiaomi MiMo",     "id": "xiaomi/mimo-v2-omni",         "label": "MiMo V2 Omni"},
 ]
 
 # Provider display names for known Hermes provider IDs
@@ -733,36 +704,14 @@ _PROVIDER_ALIASES = {
     "z-ai": "zai",
     "z.ai": "zai",
     "zhipu": "zai",
-    "github": "copilot",
-    "github-copilot": "copilot",
-    "github-models": "copilot",
-    "github-model": "copilot",
-    "google": "gemini",
-    "google-gemini": "gemini",
-    "google-ai-studio": "gemini",
     "kimi": "kimi-coding",
     "moonshot": "kimi-coding",
-    "claude": "anthropic",
-    "claude-code": "anthropic",
-    "deep-seek": "deepseek",
-    "minimax-china": "minimax-cn",
-    "minimax_cn": "minimax-cn",
-    "opencode": "opencode-zen",
-    "grok": "xai",
-    "x-ai": "xai",
-    "x.ai": "xai",
-    "aws": "bedrock",
-    "aws-bedrock": "bedrock",
-    "amazon": "bedrock",
-    "amazon-bedrock": "bedrock",
     "qwen": "alibaba",
     "aliyun": "alibaba",
     "dashscope": "alibaba",
     "alibaba-cloud": "alibaba",
-    "nim": "nvidia",
-    "nvidia-nim": "nvidia",
-    "build-nvidia": "nvidia",
-    "nemotron": "nvidia",
+    "minimax-china": "minimax-cn",
+    "minimax_cn": "minimax-cn",
     "mimo": "xiaomi",
     "xiaomi-mimo": "xiaomi",
     # Legacy alias — earlier WebUI builds wrote ``provider: local`` for unknown

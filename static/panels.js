@@ -6943,3 +6943,149 @@ async function _restoreCheckpoint(workspace,checkpoint,message){
     showToast(t('checkpoint_restore')+': '+e.message,'error');
   }
 }
+
+// -- SkillHub panel logic --
+let _skillhubData = null;
+
+async function loadSkillHub(force = false) {
+  try {
+    const data = await api('/api/skillhub/skills');
+    _skillhubData = data.skills || [];
+    renderSkillHubSkills(_skillhubData);
+  } catch (e) {
+    console.error('[skillhub] load failed:', e);
+    const list = document.getElementById('skillhubList');
+    if (list) list.innerHTML = '<div style="padding:16px;color:var(--muted);font-size:12px">无法加载 SkillHub，请检查 SKILLHUB_URL 配置。</div>';
+  }
+}
+
+function renderSkillHubSkills(skills) {
+  const list = document.getElementById('skillhubList');
+  if (!list) return;
+  if (!skills || skills.length === 0) {
+    list.innerHTML = '<div style="padding:16px;color:var(--muted);font-size:12px">SkillHub 暂无技能。</div>';
+    return;
+  }
+
+  // Group by category
+  const byCat = {};
+  for (const skill of skills) {
+    const cat = skill.category || 'Other';
+    if (!byCat[cat]) byCat[cat] = [];
+    byCat[cat].push(skill);
+  }
+
+  let html = '';
+  for (const [cat, items] of Object.entries(byCat)) {
+    html += `<div class="skills-category"><div class="skills-category-title">${esc(cat)}</div>`;
+    for (const skill of items) {
+      const installed = skill.installed;
+      const stateClass = installed ? 'installed' : '';
+      const btnText = installed ? '删除' : '安装';
+      const btnClass = installed ? '' : 'primary';
+      html += `
+        <div class="skillhub-item">
+          <div class="skillhub-main">
+            <div style="font-weight:600;font-size:12px">${esc(skill.display_name || skill.name)}</div>
+            <div style="font-size:11px;color:var(--muted);line-height:1.4">${esc(skill.description || '').slice(0,120)}</div>
+            <div class="skillhub-meta">
+              <span>v${esc(skill.version || '1.0')}</span>
+              <span>${esc(skill.author || '')}</span>
+              ${installed ? '<span class="skillhub-state installed">已安装</span>' : '<span class="skillhub-state">未安装</span>'}
+            </div>
+          </div>
+          <div class="skillhub-actions">
+            <button class="skillhub-btn" onclick="viewSkillHubContent('${esc(skill.name)}')">查看</button>
+            <button class="skillhub-btn ${btnClass}" onclick="${installed ? 'uninstallSkillHub' : 'installSkillHub'}('${esc(skill.name)}', '${esc(skill.display_name || skill.name)}', '${esc(skill.installed_name || skill.install_name || skill.name)}')">${btnText}</button>
+          </div>
+        </div>
+      `;
+    }
+    html += '</div>';
+  }
+  list.innerHTML = html;
+}
+
+async function installSkillHub(name, displayName, installName) {
+  const force = document.getElementById('skillhubForceInstall')?.checked ?? true;
+  try {
+    await api('/api/skillhub/install', {
+      method: 'POST',
+      body: JSON.stringify({ name, display_name: displayName, force })
+    });
+    showToast(`已安装: ${displayName || name}`);
+    loadSkillHub(true);
+    loadSkills(); // refresh local skills list
+  } catch (e) {
+    showToast(`安装失败: ${e.message || e}`, 'error');
+  }
+}
+
+async function uninstallSkillHub(name, displayName, installName) {
+  try {
+    await api('/api/skillhub/uninstall', {
+      method: 'POST',
+      body: JSON.stringify({ name, display_name: displayName, install_name: installName })
+    });
+    showToast(`已删除: ${displayName || name}`);
+    loadSkillHub(true);
+    loadSkills(); // refresh local skills list
+  } catch (e) {
+    showToast(`删除失败: ${e.message || e}`, 'error');
+  }
+}
+
+async function viewSkillHubContent(name) {
+  try {
+    const data = await api(`/api/skillhub/content?name=${encodeURIComponent(name)}`);
+    const content = data.content || data.readme || JSON.stringify(data, null, 2);
+    // Show in a simple modal or alert for now
+    showSkillhubPreview(name, content);
+  } catch (e) {
+    showToast(`查看失败: ${e.message || e}`, 'error');
+  }
+}
+
+function showSkillhubPreview(name, content) {
+  // Reuse the skill preview modal if available
+  const modal = document.getElementById('skillPreviewModal');
+  const title = document.getElementById('skillPreviewTitle');
+  const body = document.getElementById('skillPreviewBody');
+  if (modal && title && body) {
+    title.textContent = name;
+    body.innerHTML = `<pre style="white-space:pre-wrap;word-break:break-word;font-size:12px;line-height:1.6">${esc(content)}</pre>`;
+    modal.style.display = '';
+    return;
+  }
+  // Fallback
+  alert(content.slice(0, 2000));
+}
+
+function filterSkillHub() {
+  const q = (document.getElementById('skillhubSearch')?.value || '').toLowerCase().trim();
+  if (!_skillhubData) return;
+  if (!q) {
+    renderSkillHubSkills(_skillhubData);
+    return;
+  }
+  const filtered = _skillhubData.filter(s =>
+    (s.name || '').toLowerCase().includes(q) ||
+    (s.display_name || '').toLowerCase().includes(q) ||
+    (s.description || '').toLowerCase().includes(q)
+  );
+  renderSkillHubSkills(filtered);
+}
+
+function showToast(msg, type = 'info') {
+  // Try to use existing toast system
+  if (typeof window.showToast === 'function') {
+    window.showToast(msg, type);
+    return;
+  }
+  // Fallback
+  const el = document.createElement('div');
+  el.style.cssText = 'position:fixed;bottom:16px;right:16px;padding:8px 14px;border-radius:8px;font-size:12px;z-index:9999;background:var(--surface);border:1px solid var(--border);color:var(--text);';
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 3000);
+}

@@ -1454,6 +1454,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(!Array.isArray(inflight.toolCalls)) inflight.toolCalls=[];
       INFLIGHT[activeSid].toolCalls.push(tc);
       S.toolCalls=INFLIGHT[activeSid].toolCalls;
+      if(typeof syncTaskPanelFromToolCalls==='function') syncTaskPanelFromToolCalls();
       persistInflightState();
 
       if(!S.session||S.session.session_id!==activeSid) return;
@@ -1499,6 +1500,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       tc.is_error=!!d.is_error;
       if(d.duration!==undefined) tc.duration=d.duration;
       S.toolCalls=inflight.toolCalls;
+      if(typeof syncTaskPanelFromToolCalls==='function') syncTaskPanelFromToolCalls();
       persistInflightState();
       if(!S.session||S.session.session_id!==activeSid) return;
       appendLiveToolCard(tc);
