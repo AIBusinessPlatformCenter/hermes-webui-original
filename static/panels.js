@@ -232,7 +232,8 @@ async function switchPanel(name, opts = {}) {
   // Lazy-load panel data
   if (nextPanel === 'tasks') await loadCrons();
   if (nextPanel === 'kanban') await loadKanban();
-  if (nextPanel === 'skills') await loadSkills();
+  if (nextPanel === 'skills') { setSkillsProfileContext('DEFAULT'); _skillsData = null; await loadSkills(); }
+  if (nextPanel === 'skillhub') { setSkillsProfileContext('DEFAULT'); }
   if (nextPanel === 'memory') await loadMemory();
   if (nextPanel === 'workspaces') await loadWorkspacesPanel();
   if (nextPanel === 'profiles') await loadProfilesPanel();
@@ -761,7 +762,7 @@ function duplicateCurrentCron(){
     isEdit: false,
   });
   if (!_cronSkillsCache) {
-    api('/api/skills').then(d=>{_cronSkillsCache=d.skills||[]; _bindCronSkillPicker();}).catch(()=>{});
+    api('/api/skills?profile=DEFAULT').then(d=>{_cronSkillsCache=d.skills||[]; _bindCronSkillPicker();}).catch(()=>{});
   } else {
     _bindCronSkillPicker();
   }
@@ -793,7 +794,7 @@ function openCronCreate(){
   _cronSelectedSkills = [];
   _renderCronForm({ name:'', schedule:'', prompt:'', deliver:'local', profile:'', toast_notifications:true, isEdit:false });
   _cronSkillsCache = null;
-  api('/api/skills').then(d=>{_cronSkillsCache=d.skills||[]; _bindCronSkillPicker();}).catch(()=>{});
+  api('/api/skills?profile=DEFAULT').then(d=>{_cronSkillsCache=d.skills||[]; _bindCronSkillPicker();}).catch(()=>{});
   loadCronProfiles().then(()=>_refreshCronProfileSelect('')).catch(()=>{});
 }
 
@@ -3231,12 +3232,25 @@ async function clearConversation() {
 }
 
 // ── Skills panel ──
-async function loadSkills() {
-  if (_skillsData) { renderSkills(_skillsData); return; }
+// Active profile for skills operations (DEFAULT for global panel, profile name for profile detail view)
+let _skillsProfileContext = 'DEFAULT';
+
+function setSkillsProfileContext(profile) {
+  _skillsProfileContext = profile || 'DEFAULT';
+}
+
+function getSkillsProfileContext() {
+  return _skillsProfileContext || 'DEFAULT';
+}
+
+async function loadSkills(profile) {
+  const pr = profile || getSkillsProfileContext();
+  if (_skillsData && _skillsData.__profile === pr) { renderSkills(_skillsData); return; }
   const box = $('skillsList');
   try {
-    const data = await api('/api/skills');
+    const data = await api('/api/skills?profile=' + encodeURIComponent(pr));
     _skillsData = data.skills || [];
+    _skillsData.__profile = pr;
     // Prune collapsed state to only keep categories present in fresh data,
     // avoiding stale keys when categories are renamed or removed server-side.
     const liveCats = new Set(_skillsData.map(s => s.category || '(general)'));
@@ -3263,22 +3277,27 @@ function _toggleCatCollapse(cat) {
 }
 
 function renderSkills(skills) {
+  // Only show top-level skills (group is empty) — sub-files like
+  // "academic-paper-strategist/references" are not standalone skills.
+  let topLevel = skills.filter(s => !s.group);
   const query = ($('skillsSearch').value || '').toLowerCase();
-  const filtered = query ? skills.filter(s =>
-    (s.name||'').toLowerCase().includes(query) ||
-    (s.description||'').toLowerCase().includes(query) ||
-    (s.category||'').toLowerCase().includes(query)
-  ) : skills;
+  if (query) {
+    topLevel = topLevel.filter(s =>
+      (s.name||'').toLowerCase().includes(query) ||
+      (s.description||'').toLowerCase().includes(query) ||
+      (s.category||'').toLowerCase().includes(query)
+    );
+  }
   // Group by category
   const cats = {};
-  for (const s of filtered) {
+  for (const s of topLevel) {
     const cat = s.category || '(general)';
     if (!cats[cat]) cats[cat] = [];
     cats[cat].push(s);
   }
   const box = $('skillsList');
   box.innerHTML = '';
-  if (!filtered.length) { box.innerHTML = `<div style="padding:12px;color:var(--muted);font-size:12px">${esc(t('skills_no_match'))}</div>`; return; }
+  if (!topLevel.length) { box.innerHTML = `<div style="padding:12px;color:var(--muted);font-size:12px">${esc(t('skills_no_match'))}</div>`; return; }
   for (const [cat, items] of Object.entries(cats).sort()) {
     const collapsed = _collapsedCats.has(cat);
     const sec = document.createElement('div');
@@ -3382,14 +3401,15 @@ function _setSkillHeaderButtons(mode) {
   else { hide(editBtn); hide(delBtn); hide(cancelBtn); hide(saveBtn); }
 }
 
-async function openSkill(name, el) {
+async function openSkill(name, el, profile) {
   // Highlight active skill in the sidebar list
   document.querySelectorAll('.skill-item').forEach(e => e.classList.remove('active'));
   if (el) el.classList.add('active');
   _skillPreFormDetail = null;
   _editingSkillName = null;
+  const pr = profile || getSkillsProfileContext();
   try {
-    const data = await api(`/api/skills/content?name=${encodeURIComponent(name)}`);
+    const data = await api(`/api/skills/content?name=${encodeURIComponent(name)}&profile=${encodeURIComponent(pr)}`);
     if (data && (data.success === false || data.error)) {
       const message = data.error || t('skill_load_failed');
       _renderSkillError(name, message);
@@ -3401,9 +3421,10 @@ async function openSkill(name, el) {
   } catch(e) { setStatus(t('skill_load_failed') + e.message); }
 }
 
-async function openSkillFile(skillName, filePath) {
+async function openSkillFile(skillName, filePath, profile) {
   try {
-    const data = await api(`/api/skills/content?name=${encodeURIComponent(skillName)}&file=${encodeURIComponent(filePath)}`);
+    const pr = profile || getSkillsProfileContext();
+    const data = await api(`/api/skills/content?name=${encodeURIComponent(skillName)}&file=${encodeURIComponent(filePath)}&profile=${encodeURIComponent(pr)}`);
     if (data && data.error) {
       _renderSkillError(skillName, data.error);
       setStatus(t('skill_file_load_failed') + data.error);
@@ -3518,7 +3539,7 @@ function cancelSkillForm() {
   _setSkillHeaderButtons('empty');
 }
 
-async function saveSkillForm() {
+async function saveSkillForm(profile) {
   const nameInput = $('skillFormName');
   const catInput = $('skillFormCategory');
   const contentInput = $('skillFormContent');
@@ -3527,17 +3548,18 @@ async function saveSkillForm() {
   const name = (nameInput.value || '').trim().toLowerCase().replace(/\s+/g, '-');
   const category = (catInput ? (catInput.value || '').trim() : '');
   const content = contentInput.value;
+  const pr = profile || getSkillsProfileContext();
   errEl.style.display = 'none';
   if (!name) { errEl.textContent = t('skill_name_required'); errEl.style.display = ''; return; }
   if (!content.trim()) { errEl.textContent = t('content_required'); errEl.style.display = ''; return; }
   try {
-    await api('/api/skills/save', {method:'POST', body: JSON.stringify({name, category: category||undefined, content})});
+    await api('/api/skills/save', {method:'POST', body: JSON.stringify({name, category: category||undefined, content, profile: pr})});
     showToast(_editingSkillName ? t('skill_updated') : t('skill_created'));
     _skillsData = null;
     _cronSkillsCache = null;
     _editingSkillName = null;
     _skillPreFormDetail = null;
-    await loadSkills();
+    await loadSkills(pr);
     // Reload the saved skill in read mode with fresh content
     const row = document.querySelector(`.skill-item .skill-name`);
     const match = document.querySelectorAll('.skill-item');
@@ -3546,7 +3568,7 @@ async function saveSkillForm() {
       const nm = el.querySelector('.skill-name');
       if (nm && nm.textContent === name) targetEl = el;
     });
-    await openSkill(name, targetEl);
+    await openSkill(name, targetEl, pr);
   } catch(e) { errEl.textContent = t('error_prefix') + e.message; errEl.style.display = ''; }
 }
 
@@ -3554,9 +3576,10 @@ async function saveSkillForm() {
 const submitSkillSave = saveSkillForm;
 function toggleSkillForm(){ openSkillCreate(); }
 
-async function deleteCurrentSkill() {
+async function deleteCurrentSkill(profile) {
   if (!_currentSkillDetail) return;
   const name = _currentSkillDetail.name;
+  const pr = profile || getSkillsProfileContext();
   const message = t('skill_delete_confirm')
     ? t('skill_delete_confirm').replace('{0}', name)
     : `Delete skill "${name}"?`;
@@ -3569,7 +3592,7 @@ async function deleteCurrentSkill() {
   });
   if (!ok) return;
   try {
-    await api('/api/skills/delete', { method:'POST', body: JSON.stringify({ name }) });
+    await api('/api/skills/delete', { method:'POST', body: JSON.stringify({ name, profile: pr }) });
     _currentSkillDetail = null;
     _skillPreFormDetail = null;
     _skillsData = null;
@@ -3582,7 +3605,7 @@ async function deleteCurrentSkill() {
     if (empty) empty.style.display = '';
     if (title) title.textContent = '';
     _setSkillHeaderButtons('empty');
-    await loadSkills();
+    await loadSkills(pr);
     showToast(t('skill_deleted') || 'Skill deleted');
   } catch(e) { setStatus(t('error_prefix') + e.message); }
 }
@@ -4607,11 +4630,25 @@ function _renderProfileDetail(p, activeName){
         <div class="detail-card-title">Profile</div>
         ${rows.join('')}
       </div>
+      <div class="detail-card" style="margin-top:16px">
+        <div class="detail-card-title" style="display:flex;justify-content:space-between;align-items:center">
+          <span>Profile Skills</span>
+          <button class="btn secondary" style="font-size:11px;padding:4px 10px" onclick="loadProfileSkills('${esc(p.name)}')">刷新</button>
+        </div>
+        <div id="profileSkillsContainer" data-profile="${esc(p.name)}">
+          <div style="padding:8px 0;color:var(--muted);font-size:12px">点击刷新加载技能列表...</div>
+        </div>
+        <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border)">
+          <button class="btn primary" style="font-size:11px;padding:4px 10px" onclick="openProfileSkillhub('${esc(p.name)}')">从 SkillHub 安装</button>
+        </div>
+      </div>
     </div>`;
   body.style.display = '';
   if (empty) empty.style.display = 'none';
   _profileMode = 'read';
   _setProfileHeaderButtons('read', p, activeName);
+  // Auto-load skills for this profile
+  setTimeout(() => loadProfileSkills(p.name), 0);
 }
 
 function _setProfileHeaderButtons(mode, p, activeName){
@@ -4660,6 +4697,82 @@ function _clearProfileDetail(){
 async function activateCurrentProfile(){
   if (!_currentProfileDetail) return;
   await switchToProfile(_currentProfileDetail.name);
+}
+
+async function loadProfileSkills(profileName) {
+  const container = document.getElementById('profileSkillsContainer');
+  if (!container) return;
+  container.innerHTML = '<div style="padding:8px 0;color:var(--muted);font-size:12px">Loading skills...</div>';
+  try {
+    const data = await api('/api/skills?profile=' + encodeURIComponent(profileName));
+    const skills = data.skills || [];
+    if (!skills.length) {
+      container.innerHTML = '<div style="padding:8px 0;color:var(--muted);font-size:12px">No skills installed for this profile.</div>';
+      return;
+    }
+    // Group by category
+    const byCat = {};
+    for (const s of skills) {
+      const cat = s.category || '(general)';
+      if (!byCat[cat]) byCat[cat] = [];
+      byCat[cat].push(s);
+    }
+    let html = '';
+    for (const [cat, items] of Object.entries(byCat).sort()) {
+      html += `<div style="font-size:11px;font-weight:600;color:var(--muted);margin:8px 0 4px;text-transform:uppercase;letter-spacing:.05em">${esc(cat)}</div>`;
+      for (const skill of items.sort((a,b) => a.name.localeCompare(b.name))) {
+        html += `<div class="profile-skill-row" style="display:flex;justify-content:space-between;align-items:center;padding:6px 8px;border-radius:6px;cursor:pointer;margin-bottom:2px" onmouseover="this.style.background='var(--hover)'" onmouseout="this.style.background=''" onclick="openProfileSkill('${esc(skill.name)}', '${esc(profileName)}')">
+          <span style="font-size:12px;font-weight:500">${esc(skill.name)}</span>
+          <span style="font-size:11px;color:var(--muted)">${esc((skill.description || '').slice(0, 40))}</span>
+        </div>`;
+      }
+    }
+    container.innerHTML = html;
+  } catch (e) {
+    container.innerHTML = `<div style="padding:8px 0;color:var(--accent);font-size:12px">Error: ${esc(e.message)}</div>`;
+  }
+}
+
+async function openProfileSkill(skillName, profileName) {
+  // Show skill content in the profile detail body
+  const body = $('profileDetailBody');
+  const empty = $('profileDetailEmpty');
+  if (!body) return;
+  body.innerHTML = '<div style="padding:20px;color:var(--muted);font-size:12px">Loading skill content...</div>';
+  body.style.display = '';
+  if (empty) empty.style.display = 'none';
+  try {
+    const data = await api(`/api/skills/content?name=${encodeURIComponent(skillName)}&profile=${encodeURIComponent(profileName)}`);
+    if (data && data.error) {
+      body.innerHTML = `<div style="padding:20px;color:var(--accent);font-size:12px">Error: ${esc(data.error)}</div>`;
+      return;
+    }
+    const content = data.content || '';
+    const { body: markdownBody } = _stripYamlFrontmatter(content);
+    const backBtn = `<button class="btn secondary" style="font-size:11px;margin-bottom:12px" onclick="_rerenderCurrentProfileDetail()">← Back to profile</button>`;
+    body.innerHTML = `<div class="main-view-content">${backBtn}<div class="skill-detail-content">${renderMd(markdownBody || '(no content)')}</div></div>`;
+    body.style.display = '';
+    if (empty) empty.style.display = 'none';
+  } catch (e) {
+    body.innerHTML = `<div style="padding:20px;color:var(--accent);font-size:12px">Error: ${esc(e.message)}</div>`;
+  }
+}
+
+function _rerenderCurrentProfileDetail() {
+  if (_currentProfileDetail && _profilesCache) {
+    _renderProfileDetail(_currentProfileDetail, _profilesCache.active);
+  }
+}
+
+function openProfileSkillhub(profileName) {
+  // Switch to skillhub panel with profile context
+  setSkillsProfileContext(profileName);
+  _skillhubData = null;
+  if (typeof switchPanel === 'function') {
+    switchPanel('skillhub');
+    // After panel switch, load skillhub with this profile
+    setTimeout(() => loadSkillHub(true, profileName), 100);
+  }
 }
 
 async function deleteCurrentProfile(){
@@ -6947,15 +7060,17 @@ async function _restoreCheckpoint(workspace,checkpoint,message){
 // -- SkillHub panel logic --
 let _skillhubData = null;
 
-async function loadSkillHub(force = false) {
+async function loadSkillHub(force = false, profile) {
+  const pr = profile || getSkillsProfileContext();
   try {
-    const data = await api('/api/skillhub/skills');
+    const data = await api('/api/skillhub/skills?profile=' + encodeURIComponent(pr));
     _skillhubData = data.skills || [];
+    _skillhubData.__profile = pr;
     renderSkillHubSkills(_skillhubData);
   } catch (e) {
     console.error('[skillhub] load failed:', e);
     const list = document.getElementById('skillhubList');
-    if (list) list.innerHTML = '<div style="padding:16px;color:var(--muted);font-size:12px">无法加载 SkillHub，请检查 SKILLHUB_URL 配置。</div>';
+    if (list) list.innerHTML = '<div style="padding:16px;color:var(--muted);font-size:12px">无法加载 SkillHub，请检查 HERMES_EXTRENAL_SERVICE 或 SKILLHUB_URL 配置。</div>';
   }
 }
 
@@ -6974,6 +7089,8 @@ function renderSkillHubSkills(skills) {
     if (!byCat[cat]) byCat[cat] = [];
     byCat[cat].push(skill);
   }
+
+  const profile = skills.__profile || getSkillsProfileContext();
 
   let html = '';
   for (const [cat, items] of Object.entries(byCat)) {
@@ -6996,7 +7113,7 @@ function renderSkillHubSkills(skills) {
           </div>
           <div class="skillhub-actions">
             <button class="skillhub-btn" onclick="viewSkillHubContent('${esc(skill.name)}')">查看</button>
-            <button class="skillhub-btn ${btnClass}" onclick="${installed ? 'uninstallSkillHub' : 'installSkillHub'}('${esc(skill.name)}', '${esc(skill.display_name || skill.name)}', '${esc(skill.installed_name || skill.install_name || skill.name)}')">${btnText}</button>
+            <button class="skillhub-btn ${btnClass}" onclick="${installed ? 'uninstallSkillHub' : 'installSkillHub'}('${esc(skill.name)}', '${esc(skill.display_name || skill.name)}', '${esc(skill.installed_name || skill.install_name || skill.name)}', '${esc(profile)}')">${btnText}</button>
           </div>
         </div>
       `;
@@ -7006,30 +7123,31 @@ function renderSkillHubSkills(skills) {
   list.innerHTML = html;
 }
 
-async function installSkillHub(name, displayName, installName) {
-  const force = document.getElementById('skillhubForceInstall')?.checked ?? true;
+async function installSkillHub(name, displayName, installName, profile) {
+  const pr = profile || getSkillsProfileContext();
   try {
     await api('/api/skillhub/install', {
       method: 'POST',
-      body: JSON.stringify({ name, display_name: displayName, force })
+      body: JSON.stringify({ name, display_name: displayName, profile: pr })
     });
     showToast(`已安装: ${displayName || name}`);
-    loadSkillHub(true);
-    loadSkills(); // refresh local skills list
+    loadSkillHub(true, pr);
+    loadSkills(pr); // refresh local skills list
   } catch (e) {
     showToast(`安装失败: ${e.message || e}`, 'error');
   }
 }
 
-async function uninstallSkillHub(name, displayName, installName) {
+async function uninstallSkillHub(name, displayName, installName, profile) {
+  const pr = profile || getSkillsProfileContext();
   try {
     await api('/api/skillhub/uninstall', {
       method: 'POST',
-      body: JSON.stringify({ name, display_name: displayName, install_name: installName })
+      body: JSON.stringify({ name, display_name: displayName, install_name: installName, profile: pr })
     });
     showToast(`已删除: ${displayName || name}`);
-    loadSkillHub(true);
-    loadSkills(); // refresh local skills list
+    loadSkillHub(true, pr);
+    loadSkills(pr); // refresh local skills list
   } catch (e) {
     showToast(`删除失败: ${e.message || e}`, 'error');
   }

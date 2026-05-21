@@ -135,6 +135,172 @@ def _skillhub_request(path: str, method="GET", body=None, params=None, timeout=1
 def _skillhub_request_json(path: str, params=None):
     return _skillhub_request(path, params=params)
 
+
+# -- External Skills Service helpers --
+
+def _ext_service_base_url() -> str:
+    value = (os.getenv("HERMES_EXTRENAL_SERVICE") or "").strip().rstrip("/")
+    if not value:
+        return ""
+    parsed = urlparse(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return ""
+    return value
+
+
+def _ext_service_request(path: str, method="GET", body=None, params=None, timeout=30):
+    import urllib.request
+    import urllib.error
+    import urllib.parse
+    base = _ext_service_base_url()
+    if not base:
+        raise ValueError("HERMES_EXTRENAL_SERVICE not configured")
+    url = base + path
+    if params:
+        url = url + "?" + urllib.parse.urlencode(params)
+    data = None
+    if body is not None:
+        data = json.dumps(body).encode("utf-8")
+    req = urllib.request.Request(url, data=data, method=method)
+    if data:
+        req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            text = resp.read().decode("utf-8")
+            ct = resp.headers.get("Content-Type", "")
+            if "application/json" in ct:
+                return json.loads(text)
+            # Some endpoints (e.g. /api/skills/content) return markdown/text
+            # wrapped in JSON by the external service; try JSON first, fall
+            # back to returning the raw text so callers can wrap it.
+            try:
+                return json.loads(text)
+            except json.JSONDecodeError:
+                return text
+    except urllib.error.HTTPError as e:
+        try:
+            detail = json.loads(e.read().decode("utf-8"))
+        except Exception:
+            detail = {"error": str(e)}
+        raise RuntimeError(detail.get("error") or detail.get("message") or str(e))
+
+
+def _ext_service_profile_param(handler, parsed) -> str:
+    """Extract profile parameter from query string or cookie.
+
+    Priority:
+      1. ?profile=xxx query parameter (explicit override from frontend)
+      2. Current profile cookie (backward compat)
+      3. Fallback to 'DEFAULT' (external service default)
+    """
+    qs = parse_qs(parsed.query)
+    profile = qs.get("profile", [""])[0].strip()
+    if profile:
+        return profile
+    try:
+        from api.profiles import get_profile_cookie
+        cookie_profile = get_profile_cookie(handler)
+        if cookie_profile:
+            return cookie_profile
+    except Exception:
+        pass
+    return "DEFAULT"
+
+
+def _ext_service_proxy_skills_list(handler, parsed):
+    profile = _ext_service_profile_param(handler, parsed)
+    qs = parse_qs(parsed.query)
+    params = {"profile": profile}
+    category = qs.get("category", [None])[0]
+    if category:
+        params["category"] = category
+    return _ext_service_request("/api/skills", params=params)
+
+
+def _ext_service_proxy_skill_content(handler, parsed):
+    profile = _ext_service_profile_param(handler, parsed)
+    qs = parse_qs(parsed.query)
+    name = qs.get("name", [""])[0]
+    if not name:
+        return {"error": "name required"}
+    file_path = qs.get("file", [""])[0]
+    params = {"name": name, "profile": profile}
+    if file_path:
+        params["file"] = file_path
+    result = _ext_service_request("/api/skills/content", params=params)
+    # External service may return plain markdown text instead of JSON.
+    # Wrap it into the shape the frontend expects.
+    if isinstance(result, str):
+        return {"content": result, "linked_files": {}}
+    return result
+
+
+def _ext_service_proxy_skill_save(body, handler, parsed):
+    profile = _ext_service_profile_param(handler, parsed)
+    return _ext_service_request("/api/skills/save", method="POST", body=body, params={"profile": profile})
+
+
+def _ext_service_proxy_skill_delete(body, handler, parsed):
+    profile = _ext_service_profile_param(handler, parsed)
+    return _ext_service_request("/api/skills/delete", method="POST", body=body, params={"profile": profile})
+
+
+def _ext_service_proxy_skillhub_skills(handler, parsed):
+    profile = _ext_service_profile_param(handler, parsed)
+    qs = parse_qs(parsed.query)
+    params = {"profile": profile}
+    q = qs.get("q", [""])[0]
+    if q:
+        params["q"] = q
+    category = qs.get("category", [""])[0]
+    if category:
+        params["category"] = category
+    page = qs.get("page", [""])[0]
+    if page and page.isdigit():
+        params["page"] = page
+    page_size = qs.get("page_size", [""])[0]
+    if page_size and page_size.isdigit():
+        params["page_size"] = page_size
+    return _ext_service_request("/api/skillhub/skills", params=params)
+
+
+def _ext_service_proxy_skillhub_content(handler, parsed):
+    qs = parse_qs(parsed.query)
+    name = qs.get("name", [""])[0]
+    if not name:
+        return {"error": "name required"}
+    return _ext_service_request("/api/skillhub/content", params={"name": name})
+
+
+def _ext_service_proxy_skillhub_categories():
+    return _ext_service_request("/api/skillhub/categories")
+
+
+def _ext_service_proxy_skillhub_file(handler, parsed):
+    qs = parse_qs(parsed.query)
+    name = qs.get("name", [""])[0]
+    file_path = qs.get("file", [""])[0] or qs.get("path", [""])[0]
+    if not name or not file_path:
+        return {"error": "name and file required"}
+    return _ext_service_request("/api/skillhub/file", params={"name": name, "path": file_path})
+
+
+def _ext_service_proxy_skillhub_structure(handler, parsed):
+    qs = parse_qs(parsed.query)
+    name = qs.get("name", [""])[0]
+    if not name:
+        return {"error": "name required"}
+    return _ext_service_request("/api/skillhub/structure", params={"name": name})
+
+
+def _ext_service_proxy_skillhub_install(body):
+    return _ext_service_request("/api/skillhub/install", method="POST", body=body)
+
+
+def _ext_service_proxy_skillhub_uninstall(body):
+    return _ext_service_request("/api/skillhub/uninstall", method="POST", body=body)
+
+
 def _skillhub_local_skill_names():
     data = _skills_list_from_dir(_active_skills_dir())
     return {s.get("name", "").strip().lower() for s in data.get("skills", []) if s.get("name")}
@@ -4537,6 +4703,20 @@ def handle_get(handler, parsed) -> bool:
 
     # -- SkillHub API (GET) --
     if parsed.path == "/api/skillhub/skills":
+        ext_url = _ext_service_base_url()
+        if ext_url:
+            try:
+                data = _ext_service_proxy_skillhub_skills(handler, parsed)
+                skills = data.get("skills", [])
+                # Map external service "status" field to "installed" boolean
+                # that the frontend expects.
+                for skill in skills:
+                    status = str(skill.get("status") or "").strip()
+                    if status:
+                        skill["installed"] = status in ("已安装", "installed", "true", "yes", "1")
+                return j(handler, {"enabled": True, "skills": skills})
+            except Exception as e:
+                return bad(handler, f"SkillHub error: {e}", 502)
         hub_url = _skillhub_base_url()
         if not hub_url:
             return j(handler, {"enabled": False, "skills": []})
@@ -4560,6 +4740,13 @@ def handle_get(handler, parsed) -> bool:
             return bad(handler, f"SkillHub error: {e}", 502)
 
     if parsed.path == "/api/skillhub/categories":
+        ext_url = _ext_service_base_url()
+        if ext_url:
+            try:
+                data = _ext_service_proxy_skillhub_categories()
+                return j(handler, {"enabled": True, "categories": data.get("categories", [])})
+            except Exception as e:
+                return bad(handler, f"SkillHub error: {e}", 502)
         hub_url = _skillhub_base_url()
         if not hub_url:
             return j(handler, {"enabled": False, "categories": []})
@@ -4574,6 +4761,13 @@ def handle_get(handler, parsed) -> bool:
         name = qs.get("name", [""])[0]
         if not name:
             return bad(handler, "name required", 400)
+        ext_url = _ext_service_base_url()
+        if ext_url:
+            try:
+                data = _ext_service_proxy_skillhub_content(handler, parsed)
+                return j(handler, data)
+            except Exception as e:
+                return bad(handler, f"SkillHub error: {e}", 502)
         hub_url = _skillhub_base_url()
         if not hub_url:
             return bad(handler, "SkillHub not configured", 503)
@@ -4589,6 +4783,13 @@ def handle_get(handler, parsed) -> bool:
         file_path = qs.get("file", [""])[0]
         if not name or not file_path:
             return bad(handler, "name and file required", 400)
+        ext_url = _ext_service_base_url()
+        if ext_url:
+            try:
+                data = _ext_service_proxy_skillhub_file(handler, parsed)
+                return j(handler, data)
+            except Exception as e:
+                return bad(handler, f"SkillHub error: {e}", 502)
         hub_url = _skillhub_base_url()
         if not hub_url:
             return bad(handler, "SkillHub not configured", 503)
@@ -4600,6 +4801,13 @@ def handle_get(handler, parsed) -> bool:
 
     # ── Skills API (GET) ──
     if parsed.path == "/api/skills":
+        ext_url = _ext_service_base_url()
+        if ext_url:
+            try:
+                data = _ext_service_proxy_skills_list(handler, parsed)
+                return j(handler, {"skills": data.get("skills", [])})
+            except Exception as e:
+                return bad(handler, f"Skills error: {e}", 502)
         qs = parse_qs(parsed.query)
         category = qs.get("category", [None])[0]
         data = _skills_list_from_dir(_active_skills_dir(), category=category)
@@ -4617,6 +4825,13 @@ def handle_get(handler, parsed) -> bool:
         name = qs.get("name", [""])[0]
         if not name:
             return j(handler, {"error": "name required"}, status=400)
+        ext_url = _ext_service_base_url()
+        if ext_url:
+            try:
+                data = _ext_service_proxy_skill_content(handler, parsed)
+                return j(handler, data)
+            except Exception as e:
+                return bad(handler, f"Skills error: {e}", 502)
         file_path = qs.get("file", [""])[0]
         if file_path:
             # Serve a linked file from the skill directory
@@ -5633,6 +5848,19 @@ def handle_post(handler, parsed) -> bool:
 
     # -- SkillHub API (POST) --
     if parsed.path == "/api/skillhub/install":
+        ext_url = _ext_service_base_url()
+        if ext_url:
+            try:
+                remote_name = str(body.get("name") or "").strip()
+                display_name = str(body.get("display_name") or "").strip()
+                profile = str(body.get("profile") or "").strip() or _ext_service_profile_param(handler, parsed)
+                if not remote_name:
+                    return bad(handler, "name required", 400)
+                install_body = {"name": remote_name, "display_name": display_name, "profile": profile}
+                data = _ext_service_proxy_skillhub_install(install_body)
+                return j(handler, {"ok": True, "name": remote_name})
+            except Exception as e:
+                return bad(handler, f"SkillHub install error: {e}", 500)
         hub_url = _skillhub_base_url()
         if not hub_url:
             return bad(handler, "SkillHub not configured", 503)
@@ -5671,6 +5899,20 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, f"SkillHub install error: {e}", 500)
 
     if parsed.path == "/api/skillhub/uninstall":
+        ext_url = _ext_service_base_url()
+        if ext_url:
+            try:
+                remote_name = str(body.get("name") or "").strip()
+                install_name = str(body.get("install_name") or body.get("name") or "").strip()
+                display_name = str(body.get("display_name") or "").strip()
+                profile = str(body.get("profile") or "").strip() or _ext_service_profile_param(handler, parsed)
+                if not install_name:
+                    return bad(handler, "install_name required", 400)
+                uninstall_body = {"name": remote_name, "install_name": install_name, "display_name": display_name, "profile": profile}
+                _ext_service_proxy_skillhub_uninstall(uninstall_body)
+                return j(handler, {"ok": True})
+            except Exception as e:
+                return bad(handler, f"SkillHub uninstall error: {e}", 500)
         hub_url = _skillhub_base_url()
         if not hub_url:
             return bad(handler, "SkillHub not configured", 503)
@@ -5700,9 +5942,23 @@ def handle_post(handler, parsed) -> bool:
 
     # ── Skills (POST) ──
     if parsed.path == "/api/skills/save":
+        ext_url = _ext_service_base_url()
+        if ext_url:
+            try:
+                data = _ext_service_proxy_skill_save(body, handler, parsed)
+                return j(handler, data)
+            except Exception as e:
+                return bad(handler, f"Skills error: {e}", 502)
         return _handle_skill_save(handler, body)
 
     if parsed.path == "/api/skills/delete":
+        ext_url = _ext_service_base_url()
+        if ext_url:
+            try:
+                data = _ext_service_proxy_skill_delete(body, handler, parsed)
+                return j(handler, data)
+            except Exception as e:
+                return bad(handler, f"Skills error: {e}", 502)
         return _handle_skill_delete(handler, body)
 
     # ── Memory (POST) ──

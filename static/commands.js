@@ -709,7 +709,7 @@ async function cmdTheme(args){
 
 async function cmdSkills(args){
   try{
-    const data = await api('/api/skills');
+    const data = await api('/api/skills?profile=DEFAULT');
     let skills = data.skills || [];
     if(args){
       const q = args.toLowerCase();
@@ -1289,7 +1289,7 @@ async function loadSkillCommands(force=false){
   if(_skillCommandLoadPromise&&!force)return _skillCommandLoadPromise;
   _skillCommandLoadPromise=(async()=>{
     try{
-      const data=await api('/api/skills');
+      const data=await api('/api/skills?profile=DEFAULT');
       const deduped=new Map();
       for(const skill of (data&&data.skills)||[]){const entry=_buildSkillCommandEntry(skill);if(entry&&!deduped.has(entry.name))deduped.set(entry.name,entry);}
       _skillCommandCache=Array.from(deduped.values()).sort((a,b)=>a.name.localeCompare(b.name));

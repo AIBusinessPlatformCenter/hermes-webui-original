@@ -112,7 +112,7 @@ class TestCronSkillCacheInvalidation:
         # saveSkillForm() is the handler invoked on skill save (renamed from
         # submitSkillSave in the main-view refactor; the old name still aliases it).
         m = re.search(
-            r'async function saveSkillForm\(\).*?_skillsData\s*=\s*null.*?_cronSkillsCache\s*=\s*null',
+            r'async function saveSkillForm\b.*?_skillsData\s*=\s*null.*?_cronSkillsCache\s*=\s*null',
             src, re.DOTALL
         )
         assert m, (

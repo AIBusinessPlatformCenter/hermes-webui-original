@@ -979,8 +979,8 @@ def list_profiles_api() -> list:
         from hermes_cli.profiles import list_profiles
         infos = list_profiles()
     except ImportError:
-        # hermes_cli not available -- return just the default
-        return [_default_profile_dict()]
+        # hermes_cli not available -- fall back to scanning ~/.hermes/profiles/
+        infos = _scan_profiles_dir()
 
     active = get_active_profile_name()
     result = []
@@ -1012,6 +1012,68 @@ def _default_profile_dict() -> dict:
         'has_env': (_DEFAULT_HERMES_HOME / '.env').exists(),
         'skill_count': 0,
     }
+
+
+# Simple container matching the shape returned by hermes_cli.profiles.list_profiles
+class _ProfileInfo:
+    __slots__ = ('name', 'path', 'is_default', 'gateway_running', 'model', 'provider', 'has_env', 'skill_count')
+
+    def __init__(self, name, path, is_default=False, gateway_running=False, model=None, provider=None, has_env=False, skill_count=0):
+        self.name = name
+        self.path = path
+        self.is_default = is_default
+        self.gateway_running = gateway_running
+        self.model = model
+        self.provider = provider
+        self.has_env = has_env
+        self.skill_count = skill_count
+
+
+def _scan_profiles_dir() -> list:
+    """Scan ~/.hermes/profiles/ and return profile info objects.
+
+    Returns default first, followed by named profiles sorted alphabetically.
+    """
+    profiles = []
+    # Default profile
+    profiles.append(_ProfileInfo(
+        name='default',
+        path=_DEFAULT_HERMES_HOME,
+        is_default=True,
+        gateway_running=False,
+        model=None,
+        provider=None,
+        has_env=(_DEFAULT_HERMES_HOME / '.env').exists(),
+        skill_count=0,
+    ))
+    # Named profiles from ~/.hermes/profiles/
+    profiles_root = _profiles_root()
+    if profiles_root.exists() and profiles_root.is_dir():
+        names = []
+        for child in profiles_root.iterdir():
+            if child.is_dir() and not child.name.startswith('.'):
+                names.append(child.name)
+        names.sort()
+        for name in names:
+            profile_home = profiles_root / name
+            skills_dir = profile_home / 'skills'
+            skill_count = 0
+            if skills_dir.exists() and skills_dir.is_dir():
+                try:
+                    skill_count = sum(1 for f in skills_dir.rglob('SKILL.md') if f.is_file())
+                except Exception:
+                    pass
+            profiles.append(_ProfileInfo(
+                name=name,
+                path=profile_home,
+                is_default=False,
+                gateway_running=False,
+                model=None,
+                provider=None,
+                has_env=(profile_home / '.env').exists(),
+                skill_count=skill_count,
+            ))
+    return profiles
 
 
 def _validate_profile_name(name: str):
