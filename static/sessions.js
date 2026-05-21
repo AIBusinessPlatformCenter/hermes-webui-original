@@ -2936,22 +2936,52 @@ function renderSessionListFromCache(){
   let _groupCollapsed={};
   try{_groupCollapsed=JSON.parse(localStorage.getItem('hermes-date-groups-collapsed')||'{}');}catch(e){}
   const _saveCollapsed=()=>{try{localStorage.setItem('hermes-date-groups-collapsed',JSON.stringify(_groupCollapsed));}catch(e){}};
-  // Group sessions by date
-  const groups=[];
-  let curLabel=null,curItems=[];
-  if(pinned.length) groups.push({label:'\u2605 Pinned',items:pinned,isPinned:true});
-  for(const s of unpinned){
-    const ts=_sessionTimestampMs(s);
-    const label=_sessionTimeBucketLabel(ts, now);
-    if(label!==curLabel){
-      if(curItems.length) groups.push({label:curLabel,items:curItems});
-      curLabel=label;curItems=[s];
-    } else { curItems.push(s); }
+
+  // Profile grouping (when showing all profiles)
+  let _profileGroupCollapsed={};
+  try{_profileGroupCollapsed=JSON.parse(localStorage.getItem('hermes-profile-groups-collapsed')||'{}');}catch(e){}
+  const _saveProfileCollapsed=()=>{try{localStorage.setItem('hermes-profile-groups-collapsed',JSON.stringify(_profileGroupCollapsed));}catch(e){}};
+
+  function _buildDateGroups(sessionsForGroup, profileName){
+    const groups=[];
+    const groupPinned=sessionsForGroup.filter(s=>s.pinned);
+    const groupUnpinned=sessionsForGroup.filter(s=>!s.pinned);
+    let curLabel=null,curItems=[];
+    if(groupPinned.length) groups.push({profile:profileName,label:'\u2605 Pinned',items:groupPinned,isPinned:true});
+    for(const s of groupUnpinned){
+      const ts=_sessionTimestampMs(s);
+      const label=_sessionTimeBucketLabel(ts, now);
+      if(label!==curLabel){
+        if(curItems.length) groups.push({profile:profileName,label:curLabel,items:curItems});
+        curLabel=label;curItems=[s];
+      } else { curItems.push(s); }
+    }
+    if(curItems.length) groups.push({profile:profileName,label:curLabel,items:curItems});
+    return groups;
   }
-  if(curItems.length) groups.push({label:curLabel,items:curItems});
+
+  // Group sessions by date (and by profile when showing all profiles)
+  let groups=[];
+  const profileNames=[...new Set(orderedSessions.map(s=>s.profile||'default'))];
+  const shouldGroupByProfile=_showAllProfiles && profileNames.length>1;
+  if(shouldGroupByProfile){
+    const activeProfile=S.activeProfile||'default';
+    profileNames.sort((a,b)=>{
+      if(a===activeProfile && b!==activeProfile) return -1;
+      if(b===activeProfile && a!==activeProfile) return 1;
+      return a.localeCompare(b);
+    });
+    for(const profileName of profileNames){
+      const profileSessions=orderedSessions.filter(s=>(s.profile||'default')===profileName);
+      groups.push(..._buildDateGroups(profileSessions, profileName));
+    }
+  } else {
+    groups=_buildDateGroups(orderedSessions, null);
+  }
   const flatSessionRows=[];
   for(const g of groups){
     if(_groupCollapsed[g.label]) continue;
+    if(shouldGroupByProfile && g.profile && _profileGroupCollapsed[g.profile]) continue;
     for(const s of g.items){ flatSessionRows.push({group:g,session:s}); }
   }
   _sessionVisibleSidebarIds=flatSessionRows.map(row=>row.session&&row.session.session_id).filter(Boolean);
@@ -2998,7 +3028,57 @@ function renderSessionListFromCache(){
   // current session-row window plus top/bottom spacers inside each group body;
   // headers remain real DOM so pin/archive/date grouping and clicks survive.
   let globalSessionRowIndex=0;
+  let currentProfileInRender=null;
+  let currentProfileBody=null;
+
   for(const g of groups){
+    // Profile group header (when showing all profiles with multiple profiles)
+    if(shouldGroupByProfile && g.profile && g.profile!==currentProfileInRender){
+      currentProfileInRender=g.profile;
+
+      const profileWrapper=document.createElement('div');
+      profileWrapper.className='session-profile-group';
+
+      const profileHdr=document.createElement('div');
+      profileHdr.className='session-profile-header'+((g.profile===(S.activeProfile||'default'))?' active-profile':'');
+      const profileCaret=document.createElement('span');
+      profileCaret.className='session-profile-caret';
+      profileCaret.textContent='▾';
+      const profileLabel=document.createElement('span');
+      profileLabel.className='session-profile-label';
+      profileLabel.textContent=g.profile;
+      const profileCount=document.createElement('span');
+      profileCount.className='session-profile-count';
+      profileCount.textContent=String(orderedSessions.filter(s=>(s.profile||'default')===g.profile).length);
+
+      profileHdr.appendChild(profileCaret);
+      profileHdr.appendChild(profileLabel);
+      profileHdr.appendChild(profileCount);
+
+      currentProfileBody=document.createElement('div');
+      currentProfileBody.className='session-profile-body';
+
+      const isProfileCollapsed=Boolean(_profileGroupCollapsed[g.profile]);
+      if(isProfileCollapsed){
+        currentProfileBody.style.display='none';
+        profileCaret.classList.add('collapsed');
+      }
+
+      profileHdr.onclick=(e)=>{
+        e.stopPropagation();
+        const isCollapsed=currentProfileBody.style.display==='none';
+        currentProfileBody.style.display=isCollapsed?'':'none';
+        profileCaret.classList.toggle('collapsed',!isCollapsed);
+        _profileGroupCollapsed[g.profile]=!isCollapsed;
+        _saveProfileCollapsed();
+        renderSessionListFromCache();
+      };
+
+      profileWrapper.appendChild(profileHdr);
+      profileWrapper.appendChild(currentProfileBody);
+      list.appendChild(profileWrapper);
+    }
+
     const wrapper=document.createElement('div');
     wrapper.className='session-date-group';
     const hdr=document.createElement('div');
@@ -3035,7 +3115,8 @@ function renderSessionListFromCache(){
     if(groupTopPad>0){ body.insertBefore(_sessionVirtualSpacer(groupTopPad,'before'), body.firstChild); }
     if(groupBottomPad>0){ body.appendChild(_sessionVirtualSpacer(groupBottomPad,'after')); }
     wrapper.appendChild(body);
-    list.appendChild(wrapper);
+    const parentContainer=currentProfileBody||list;
+    parentContainer.appendChild(wrapper);
   }
   if(virtualAnchorScrollTop!==null){
     list.scrollTop=virtualAnchorScrollTop;
