@@ -3794,6 +3794,7 @@ def handle_get(handler, parsed) -> bool:
                 .replace("__WEBUI_VERSION__", version_token)
                 .replace("__MAX_UPLOAD_BYTES__", str(MAX_UPLOAD_BYTES))
                 .replace("__CSRF_TOKEN_JSON__", json.dumps(csrf_token))
+                .replace("__EXTERNAL_SERVICE_URL_JSON__", json.dumps(_ext_service_base_url()))
             )
             return t(
                 handler,

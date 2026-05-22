@@ -358,7 +358,7 @@ function _cronProfileTitle(profile){
 async function loadCronProfiles(){
   if (_cronProfilesCache) return _cronProfilesCache;
   try {
-    const data = await api('/api/profiles');
+    const data = await apiExternal('/api/profiles');
     _cronProfilesCache = Array.isArray(data.profiles) ? data.profiles : [];
   } catch(e) {
     _cronProfilesCache = [];
@@ -1913,7 +1913,7 @@ async function _kanbanLoadProfileNames(){
   );
   if (hasFreshCache) return _kanbanProfileNamesCache;
   try {
-    const data = await api('/api/profiles');
+    const data = await apiExternal('/api/profiles');
     const profiles = Array.isArray(data && data.profiles) ? data.profiles : [];
     const names = profiles.map(p => p && p.name).filter(Boolean);
     // Stable order: default first, then alphabetical.
@@ -4512,11 +4512,17 @@ async function switchToWorkspace(path,name){
 // ── Profile panel + dropdown ──
 let _profilesCache = null;
 
+function _profileLogoHtml(logoBase64, cls){
+  if(!logoBase64) return '';
+  const c = cls || 'profile-logo';
+  return `<img src="${esc(logoBase64)}" class="${c}" alt="" width="30" height="30">`;
+}
+
 async function loadProfilesPanel() {
   const panel = $('profilesPanel');
   if (!panel) return;
   try {
-    const data = await api('/api/profiles');
+    const data = await apiExternal('/api/profiles');
     _profilesCache = data;
     panel.innerHTML = '';
     const explainer = document.createElement('div');
@@ -4555,11 +4561,17 @@ async function loadProfilesPanel() {
       const isActive = p.name === activeName;
       const activeBadge = isActive ? `<span style="color:var(--link);font-size:10px;font-weight:600;margin-left:6px">${esc(t('profile_active'))}</span>` : '';
       const defaultBadge = p.is_default ? ` <span style="opacity:.5">${esc(t('profile_default_label'))}</span>` : '';
+      const displayName = p.display_name || p.name;
+      const nameSecondary = p.display_name && p.display_name !== p.name ? `<span class="profile-name-secondary">${esc(p.name)}</span>` : '';
+      const logoHtml = _profileLogoHtml(p.logo_base64, 'profile-logo');
+      const descHtml = p.description ? `<div class="profile-desc">${esc(p.description)}</div>` : '';
       card.innerHTML = `
         <div class="profile-card-header">
+          ${logoHtml}
           <div style="min-width:0;flex:1">
-            <div class="profile-card-name${isActive ? ' is-active' : ''}">${gwDot}${esc(p.name)}${defaultBadge}${activeBadge}</div>
+            <div class="profile-card-name${isActive ? ' is-active' : ''}">${gwDot}${esc(displayName)}${nameSecondary}${defaultBadge}${activeBadge}</div>
             ${meta.length ? `<div class="profile-card-meta">${esc(meta.join(' \u00b7 '))}</div>` : `<div class="profile-card-meta">${esc(t('profile_no_configuration'))}</div>`}
+            ${descHtml}
           </div>
         </div>`;
       card.onclick = () => openProfileDetail(p.name, card);
@@ -4605,7 +4617,8 @@ function _renderProfileDetail(p, activeName){
   const body = $('profileDetailBody');
   const empty = $('profileDetailEmpty');
   if (!title || !body) return;
-  title.textContent = p.name;
+  const displayName = p.display_name || p.name;
+  title.textContent = displayName;
   const isActive = p.name === activeName;
   const isDefault = !!p.is_default;
   const statusBadge = isActive
@@ -4615,7 +4628,17 @@ function _renderProfileDetail(p, activeName){
   const gwBadge = p.gateway_running
     ? `<span class="detail-badge ok">${esc(t('profile_gateway_running'))}</span>`
     : `<span class="detail-badge">${esc(t('profile_gateway_stopped'))}</span>`;
+  const logoDetail = _profileLogoHtml(p.logo_base64, 'profile-logo-detail');
   const rows = [];
+  if (logoDetail) {
+    rows.push(`<div class="detail-row"><div class="detail-row-label">Logo</div><div class="detail-row-value">${logoDetail}</div></div>`);
+  }
+  if (p.display_name && p.display_name !== p.name) {
+    rows.push(`<div class="detail-row"><div class="detail-row-label">Name</div><div class="detail-row-value"><code>${esc(p.name)}</code></div></div>`);
+  }
+  if (p.description) {
+    rows.push(`<div class="detail-row"><div class="detail-row-label">Description</div><div class="detail-row-value">${esc(p.description)}</div></div>`);
+  }
   rows.push(`<div class="detail-row"><div class="detail-row-label">Status</div><div class="detail-row-value">${statusBadge}${defaultBadge}</div></div>`);
   rows.push(`<div class="detail-row"><div class="detail-row-label">Gateway</div><div class="detail-row-value">${gwBadge}</div></div>`);
   if (p.model) rows.push(`<div class="detail-row"><div class="detail-row-label">Model</div><div class="detail-row-value"><code>${esc(p.model)}</code></div></div>`);
@@ -4627,7 +4650,7 @@ function _renderProfileDetail(p, activeName){
   body.innerHTML = `
     <div class="main-view-content">
       <div class="detail-card">
-        <div class="detail-card-title">Profile</div>
+        <div class="detail-card-title" style="display:flex;align-items:center;gap:10px">${logoDetail ? logoDetail : ''}Profile</div>
         ${rows.join('')}
       </div>
       <div class="detail-card" style="margin-top:16px">
@@ -4806,7 +4829,9 @@ function renderProfileDropdown(data) {
     const gwDot = `<span class="profile-opt-badge ${p.gateway_running ? 'running' : 'stopped'}"></span>`;
     const checkmark = p.name === active ? ' <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--link)" stroke-width="3" style="vertical-align:-1px"><polyline points="20 6 9 17 4 12"/></svg>' : '';
     const defaultBadge = p.is_default ? ` <span style="opacity:.5;font-weight:400">${esc(t('profile_default_label'))}</span>` : '';
-    opt.innerHTML = `<div class="profile-opt-name">${gwDot}${esc(p.name)}${defaultBadge}${checkmark}</div>` +
+    const displayName = p.display_name || p.name;
+    const logoHtml = _profileLogoHtml(p.logo_base64, 'profile-logo');
+    opt.innerHTML = `<div class="profile-opt-name">${logoHtml}${gwDot}${esc(displayName)}${defaultBadge}${checkmark}</div>` +
       (meta.length ? `<div class="profile-opt-meta">${esc(meta.join(' \u00b7 '))}</div>` : '');
     opt.onclick = async () => {
       closeProfileDropdown();
@@ -4829,7 +4854,7 @@ function toggleProfileDropdown() {
   if (dd.classList.contains('open')) { closeProfileDropdown(); return; }
   closeWsDropdown(); // close workspace dropdown if open
   if(typeof closeModelDropdown==='function') closeModelDropdown();
-  api('/api/profiles').then(data => {
+  apiExternal('/api/profiles').then(data => {
     renderProfileDropdown(data);
     dd.classList.add('open');
     _positionProfileDropdown();

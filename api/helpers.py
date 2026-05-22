@@ -38,6 +38,11 @@ def safe_resolve(root: Path, requested: str) -> Path:
 
 def _security_headers(handler):
     """Add security headers to every response."""
+    import os as _os
+    _ext_svc = (_os.getenv('HERMES_EXTERNAL_SERVICE') or '').strip().rstrip('/')
+    _connect_src = "connect-src 'self' https://cdn.jsdelivr.net"
+    if _ext_svc:
+        _connect_src += ' ' + _ext_svc
     handler.send_header('X-Content-Type-Options', 'nosniff')
     handler.send_header('X-Frame-Options', 'DENY')
     handler.send_header('Referrer-Policy', 'same-origin')
@@ -46,7 +51,7 @@ def _security_headers(handler):
         "default-src 'self' https://*.cloudflareaccess.com; "
         "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://static.cloudflareinsights.com; "
         "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com; "
-        "img-src 'self' data: https: blob:; font-src 'self' data: https://cdn.jsdelivr.net https://fonts.gstatic.com; connect-src 'self' https://cdn.jsdelivr.net; "
+        "img-src 'self' data: https: blob:; font-src 'self' data: https://cdn.jsdelivr.net https://fonts.gstatic.com; " + _connect_src + "; "
         "manifest-src 'self' https://*.cloudflareaccess.com; "
         "base-uri 'self'; form-action 'self'"
     )
