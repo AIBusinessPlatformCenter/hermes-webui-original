@@ -139,7 +139,7 @@ def _skillhub_request_json(path: str, params=None):
 # -- External Skills Service helpers --
 
 def _ext_service_base_url() -> str:
-    value = (os.getenv("HERMES_EXTRENAL_SERVICE") or "").strip().rstrip("/")
+    value = (os.getenv("HERMES_EXTERNAL_SERVICE") or "").strip().rstrip("/")
     if not value:
         return ""
     parsed = urlparse(value)
@@ -154,7 +154,7 @@ def _ext_service_request(path: str, method="GET", body=None, params=None, timeou
     import urllib.parse
     base = _ext_service_base_url()
     if not base:
-        raise ValueError("HERMES_EXTRENAL_SERVICE not configured")
+        raise ValueError("HERMES_EXTERNAL_SERVICE not configured")
     url = base + path
     if params:
         url = url + "?" + urllib.parse.urlencode(params)
