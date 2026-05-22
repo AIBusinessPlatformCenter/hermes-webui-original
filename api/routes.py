@@ -3794,6 +3794,7 @@ def handle_get(handler, parsed) -> bool:
                 .replace("__WEBUI_VERSION__", version_token)
                 .replace("__MAX_UPLOAD_BYTES__", str(MAX_UPLOAD_BYTES))
                 .replace("__CSRF_TOKEN_JSON__", json.dumps(csrf_token))
+                .replace("__HERMES_EXTERNAL_SERVICE__", json.dumps(_ext_service_base_url()))
             )
             return t(
                 handler,
@@ -4867,12 +4868,17 @@ def handle_get(handler, parsed) -> bool:
 
     # ── Profile API (GET) ──
     if parsed.path == "/api/profiles":
-        from api.profiles import list_profiles_api, get_active_profile_name
+        try:
+            data = _ext_service_request("/api/profiles")
+            return j(handler, data)
+        except Exception:
+            # fallback to local implementation if external service is unavailable
+            from api.profiles import list_profiles_api, get_active_profile_name
 
-        return j(
-            handler,
-            {"profiles": list_profiles_api(), "active": get_active_profile_name()},
-        )
+            return j(
+                handler,
+                {"profiles": list_profiles_api(), "active": get_active_profile_name()},
+            )
 
     if parsed.path == "/api/profile/active":
         from api.profiles import get_active_profile_name, get_active_hermes_home

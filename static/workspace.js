@@ -85,6 +85,86 @@ async function api(path,opts={}){
   throw lastErr;
 }
 
+// Call hermes-external-service API directly (reads base URL from __HERMES_CONFIG__).
+// Falls back to the regular api() if externalService is not configured.
+async function apiExternal(path,opts={}){
+  const cfg=window.__HERMES_CONFIG__||{};
+  const base=cfg.externalService||'';
+  if(!base) return api(path,opts);
+  const rel=path.startsWith('/')?path.slice(1):path;
+  const url=new URL(rel,base+'/');
+  const timeoutMs=Object.prototype.hasOwnProperty.call(opts,'timeoutMs')?opts.timeoutMs:30000;
+  let lastErr;
+  for(let attempt=0;attempt<3;attempt++){
+    let controller=null;
+    let timeoutId=null;
+    let didTimeout=false;
+    let upstreamSignal=null;
+    let upstreamAbort=null;
+    try{
+      const fetchOpts={...opts};
+      delete fetchOpts.timeoutMs;
+      const useTimeout=Number.isFinite(Number(timeoutMs))&&Number(timeoutMs)>0;
+      if(useTimeout&&typeof AbortController!=='undefined'){
+        controller=new AbortController();
+        upstreamSignal=fetchOpts.signal||null;
+        if(upstreamSignal){
+          upstreamAbort=()=>controller.abort(upstreamSignal.reason);
+          if(upstreamSignal.aborted) upstreamAbort();
+          else upstreamSignal.addEventListener('abort',upstreamAbort,{once:true});
+        }
+        fetchOpts.signal=controller.signal;
+      }
+      const requestPromise=(async()=>{
+        const res=await fetch(url.href,{credentials:'include',headers:{'Content-Type':'application/json'},...fetchOpts});
+        if(!res.ok){
+          if(res.status===401){window.location.href='login?next='+encodeURIComponent(window.location.pathname+window.location.search);return;}
+          const text=await res.text();
+          let message=text;
+          try{const j=JSON.parse(text);message=j.error||j.message||text;}catch(e){}
+          const err=new Error(message);
+          err.status=res.status;
+          err.statusText=res.statusText;
+          err.body=text;
+          throw err;
+        }
+        const ct=res.headers.get('content-type')||'';
+        return ct.includes('application/json')?await res.json():await res.text();
+      })();
+      return useTimeout?await Promise.race([
+        requestPromise,
+        new Promise((_,reject)=>{
+          timeoutId=setTimeout(()=>{
+            didTimeout=true;
+            if(controller) controller.abort();
+            const err=new Error('Request timed out. Please try again.');
+            err.name='TimeoutError';
+            err.timeout=true;
+            reject(err);
+          },Number(timeoutMs));
+        })
+      ]):await requestPromise;
+    }catch(e){
+      lastErr=e;
+      const isTimeout=didTimeout||(e&&(e.timeout===true||e.name==='TimeoutError'));
+      if(isTimeout){
+        const err=(e&&e.name==='TimeoutError')?e:new Error('Request timed out. Please try again.');
+        err.name='TimeoutError';
+        err.timeout=true;
+        if(typeof showToast==='function') showToast('Request timed out. Please try again.',5000,'error');
+        throw err;
+      }
+      if(e.message&&/401/.test(e.message)) throw e;
+      if(attempt<2 && e instanceof TypeError) continue;
+      throw e;
+    }finally{
+      if(timeoutId) clearTimeout(timeoutId);
+      if(upstreamSignal&&upstreamAbort) upstreamSignal.removeEventListener('abort',upstreamAbort);
+    }
+  }
+  throw lastErr;
+}
+
 // Persist/restore expanded directory state per workspace in localStorage
 function _wsExpandKey(){
   const ws=S.session&&S.session.workspace;

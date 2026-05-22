@@ -358,7 +358,7 @@ function _cronProfileTitle(profile){
 async function loadCronProfiles(){
   if (_cronProfilesCache) return _cronProfilesCache;
   try {
-    const data = await api('/api/profiles');
+    const data = await apiExternal('/api/profiles');
     _cronProfilesCache = Array.isArray(data.profiles) ? data.profiles : [];
   } catch(e) {
     _cronProfilesCache = [];
@@ -375,7 +375,8 @@ function _cronProfileOptions(selected){
     const name = _cronProfileName(p && p.name);
     if (!name || seen.has(name)) continue;
     seen.add(name);
-    const label = p && p.is_default ? `${name} (${t('default') || 'default'})` : name;
+    const displayName = (p && p.display_name) || name;
+    const label = p && p.is_default ? `${displayName} (${t('default') || 'default'})` : displayName;
     opts.push(`<option value="${esc(name)}"${current === name ? ' selected' : ''}>${esc(label)}</option>`);
   }
   if (current && !seen.has(current)) {
@@ -1913,7 +1914,7 @@ async function _kanbanLoadProfileNames(){
   );
   if (hasFreshCache) return _kanbanProfileNamesCache;
   try {
-    const data = await api('/api/profiles');
+    const data = await apiExternal('/api/profiles');
     const profiles = Array.isArray(data && data.profiles) ? data.profiles : [];
     const names = profiles.map(p => p && p.name).filter(Boolean);
     // Stable order: default first, then alphabetical.
@@ -4516,7 +4517,7 @@ async function loadProfilesPanel() {
   const panel = $('profilesPanel');
   if (!panel) return;
   try {
-    const data = await api('/api/profiles');
+    const data = await apiExternal('/api/profiles');
     _profilesCache = data;
     panel.innerHTML = '';
     const explainer = document.createElement('div');
@@ -4545,6 +4546,7 @@ async function loadProfilesPanel() {
       const card = document.createElement('div');
       card.className = 'profile-card';
       card.dataset.name = p.name;
+      const displayName = p.display_name || p.name;
       const meta = [];
       if (p.model) meta.push(p.model.split('/').pop());
       if (p.provider) meta.push(p.provider);
@@ -4555,10 +4557,15 @@ async function loadProfilesPanel() {
       const isActive = p.name === activeName;
       const activeBadge = isActive ? `<span style="color:var(--link);font-size:10px;font-weight:600;margin-left:6px">${esc(t('profile_active'))}</span>` : '';
       const defaultBadge = p.is_default ? ` <span style="opacity:.5">${esc(t('profile_default_label'))}</span>` : '';
+      const logoHtml = p.logo_base64
+        ? `<img src="${esc(p.logo_base64)}" style="width:30px;height:30px;object-fit:cover;border-radius:4px;margin-right:8px;flex-shrink:0;" alt="">`
+        : '';
+      const descAttr = p.description ? ` title="${esc(p.description)}"` : '';
       card.innerHTML = `
-        <div class="profile-card-header">
+        <div class="profile-card-header"${descAttr}>
+          ${logoHtml}
           <div style="min-width:0;flex:1">
-            <div class="profile-card-name${isActive ? ' is-active' : ''}">${gwDot}${esc(p.name)}${defaultBadge}${activeBadge}</div>
+            <div class="profile-card-name${isActive ? ' is-active' : ''}">${gwDot}${esc(displayName)}${defaultBadge}${activeBadge}</div>
             ${meta.length ? `<div class="profile-card-meta">${esc(meta.join(' \u00b7 '))}</div>` : `<div class="profile-card-meta">${esc(t('profile_no_configuration'))}</div>`}
           </div>
         </div>`;
@@ -4605,7 +4612,8 @@ function _renderProfileDetail(p, activeName){
   const body = $('profileDetailBody');
   const empty = $('profileDetailEmpty');
   if (!title || !body) return;
-  title.textContent = p.name;
+  const displayName = p.display_name || p.name;
+  title.textContent = displayName;
   const isActive = p.name === activeName;
   const isDefault = !!p.is_default;
   const statusBadge = isActive
@@ -4615,7 +4623,11 @@ function _renderProfileDetail(p, activeName){
   const gwBadge = p.gateway_running
     ? `<span class="detail-badge ok">${esc(t('profile_gateway_running'))}</span>`
     : `<span class="detail-badge">${esc(t('profile_gateway_stopped'))}</span>`;
+  const logoHtml = p.logo_base64
+    ? `<img src="${esc(p.logo_base64)}" style="width:30px;height:30px;object-fit:cover;border-radius:4px;margin-right:10px;" alt="">`
+    : '';
   const rows = [];
+  if (p.description) rows.push(`<div class="detail-row"><div class="detail-row-label">Description</div><div class="detail-row-value">${esc(p.description)}</div></div>`);
   rows.push(`<div class="detail-row"><div class="detail-row-label">Status</div><div class="detail-row-value">${statusBadge}${defaultBadge}</div></div>`);
   rows.push(`<div class="detail-row"><div class="detail-row-label">Gateway</div><div class="detail-row-value">${gwBadge}</div></div>`);
   if (p.model) rows.push(`<div class="detail-row"><div class="detail-row-label">Model</div><div class="detail-row-value"><code>${esc(p.model)}</code></div></div>`);
@@ -4800,13 +4812,17 @@ function renderProfileDropdown(data) {
   for (const p of profiles) {
     const opt = document.createElement('div');
     opt.className = 'profile-opt' + (p.name === active ? ' active' : '');
+    const displayName = p.display_name || p.name;
     const meta = [];
     if (p.model) meta.push(p.model.split('/').pop());
     if (p.skill_count) meta.push(t('profile_skill_count', p.skill_count));
     const gwDot = `<span class="profile-opt-badge ${p.gateway_running ? 'running' : 'stopped'}"></span>`;
     const checkmark = p.name === active ? ' <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--link)" stroke-width="3" style="vertical-align:-1px"><polyline points="20 6 9 17 4 12"/></svg>' : '';
     const defaultBadge = p.is_default ? ` <span style="opacity:.5;font-weight:400">${esc(t('profile_default_label'))}</span>` : '';
-    opt.innerHTML = `<div class="profile-opt-name">${gwDot}${esc(p.name)}${defaultBadge}${checkmark}</div>` +
+    const logoHtml = p.logo_base64
+      ? `<img src="${esc(p.logo_base64)}" style="width:30px;height:30px;object-fit:cover;border-radius:4px;margin-right:8px;flex-shrink:0;" alt="">`
+      : '';
+    opt.innerHTML = `<div class="profile-opt-name">${logoHtml}${gwDot}${esc(displayName)}${defaultBadge}${checkmark}</div>` +
       (meta.length ? `<div class="profile-opt-meta">${esc(meta.join(' \u00b7 '))}</div>` : '');
     opt.onclick = async () => {
       closeProfileDropdown();
