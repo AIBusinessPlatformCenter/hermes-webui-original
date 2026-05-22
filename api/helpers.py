@@ -39,7 +39,7 @@ def safe_resolve(root: Path, requested: str) -> Path:
 def _security_headers(handler):
     """Add security headers to every response."""
     import os as _os
-    _ext_svc = (_os.getenv('HERMES_EXTERNAL_SERVICE') or '').strip().rstrip('/')
+    _ext_svc = (_os.getenv('HERMES_EXTERNAL_SERVICE_PUBLIC') or _os.getenv('HERMES_EXTERNAL_SERVICE') or '').strip().rstrip('/')
     _connect_src = "connect-src 'self' https://cdn.jsdelivr.net"
     if _ext_svc:
         _connect_src += ' ' + _ext_svc

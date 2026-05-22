@@ -148,6 +148,17 @@ def _ext_service_base_url() -> str:
     return value
 
 
+def _ext_service_public_url() -> str:
+    """URL exposed to the browser (may differ from base_url in containerized deployments)."""
+    value = (os.getenv("HERMES_EXTERNAL_SERVICE_PUBLIC") or "").strip().rstrip("/")
+    if not value:
+        return _ext_service_base_url()
+    parsed = urlparse(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return _ext_service_base_url()
+    return value
+
+
 def _ext_service_request(path: str, method="GET", body=None, params=None, timeout=30):
     import urllib.request
     import urllib.error
@@ -3794,7 +3805,7 @@ def handle_get(handler, parsed) -> bool:
                 .replace("__WEBUI_VERSION__", version_token)
                 .replace("__MAX_UPLOAD_BYTES__", str(MAX_UPLOAD_BYTES))
                 .replace("__CSRF_TOKEN_JSON__", json.dumps(csrf_token))
-                .replace("__EXTERNAL_SERVICE_URL_JSON__", json.dumps(_ext_service_base_url()))
+                .replace("__EXTERNAL_SERVICE_URL_JSON__", json.dumps(_ext_service_public_url()))
             )
             return t(
                 handler,
